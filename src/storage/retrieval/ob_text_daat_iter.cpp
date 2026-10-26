@@ -107,6 +107,82 @@ int ObTextDaaTIter::get_next_rows_batch_union(const int64_t capacity, int64_t &c
 int ObTextDaaTIter::get_next_union_doc_id(ObDocIdExt &doc_id)
 {
   int ret = OB_SUCCESS;
+  const int64_t dim_cnt = dim_iters_->count();
+  if (OB_LIKELY(1 == dim_cnt)) {
+    if (OB_UNLIKELY(batch_union_finished_[0])) {
+      ret = OB_ITER_END;
+    } else {
+      ObTextRetrievalDaaTTokenIter *iter =
+          static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(0));
+      if (!iter->has_current_doc_id()) {
+        ret = iter->load_next_doc_id_batch();
+        if (OB_ITER_END == ret) {
+          batch_union_finished_[0] = true;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        doc_id = iter->get_current_doc_id();
+        iter->advance_current_doc_id();
+      }
+    }
+    return ret;
+  }
+  if (2 == dim_cnt) {
+    if (batch_union_finished_[0] && batch_union_finished_[1]) {
+      return OB_ITER_END;
+    }
+    ObTextRetrievalDaaTTokenIter *iter0 =
+        static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(0));
+    ObTextRetrievalDaaTTokenIter *iter1 =
+        static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(1));
+    if (!batch_union_finished_[0] && !iter0->has_current_doc_id()) {
+      ret = iter0->load_next_doc_id_batch();
+      if (OB_ITER_END == ret) {
+        batch_union_finished_[0] = true;
+        ret = OB_SUCCESS;
+      }
+    }
+    if (OB_SUCC(ret) && !batch_union_finished_[1] && !iter1->has_current_doc_id()) {
+      ret = iter1->load_next_doc_id_batch();
+      if (OB_ITER_END == ret) {
+        batch_union_finished_[1] = true;
+        ret = OB_SUCCESS;
+      }
+    }
+    if (OB_FAIL(ret)) {
+      return ret;
+    }
+    if (batch_union_finished_[0] && batch_union_finished_[1]) {
+      return OB_ITER_END;
+    } else if (batch_union_finished_[0]) {
+      doc_id = iter1->get_current_doc_id();
+      iter1->advance_current_doc_id();
+      return OB_SUCCESS;
+    } else if (batch_union_finished_[1]) {
+      doc_id = iter0->get_current_doc_id();
+      iter0->advance_current_doc_id();
+      return OB_SUCCESS;
+    } else {
+      int64_t cmp_ret = 0;
+      const ObDocIdExt &id0 = iter0->get_current_doc_id();
+      const ObDocIdExt &id1 = iter1->get_current_doc_id();
+      if (OB_FAIL(compare_doc_id(id0, id1, cmp_ret))) {
+        return ret;
+      } else if (cmp_ret < 0) {
+        doc_id = id0;
+        iter0->advance_current_doc_id();
+      } else if (cmp_ret > 0) {
+        doc_id = id1;
+        iter1->advance_current_doc_id();
+      } else {
+        doc_id = id0;
+        iter0->advance_current_doc_id();
+        iter1->advance_current_doc_id();
+      }
+      return OB_SUCCESS;
+    }
+  }
+
   int64_t min_idx = -1;
   for (int64_t i = 0; OB_SUCC(ret) && i < dim_iters_->count(); ++i) {
     if (batch_union_finished_[i]) {
@@ -175,7 +251,7 @@ int ObTextDaaTIter::compare_doc_id(
   int ret = OB_SUCCESS;
   const ObDatum &left_datum = left.get_datum();
   const ObDatum &right_datum = right.get_datum();
-  if (common::ObUInt64Type == iter_param_->id_proj_expr_->datum_meta_.type_) {
+  if (OB_LIKELY(common::ObUInt64Type == iter_param_->id_proj_expr_->datum_meta_.type_)) {
     const uint64_t left_id = left_datum.get_uint64();
     const uint64_t right_id = right_datum.get_uint64();
     cmp_ret = left_id < right_id ? -1 : left_id > right_id ? 1 : 0;

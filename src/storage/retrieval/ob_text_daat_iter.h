@@ -69,7 +69,7 @@ protected:
 private:
   int get_next_rows_batch_union(const int64_t capacity, int64_t &count);
   int get_next_union_doc_id(ObDocIdExt &doc_id);
-  int compare_doc_id(const ObDocIdExt &left, const ObDocIdExt &right, int64_t &cmp_ret) const;
+  OB_INLINE int compare_doc_id(const ObDocIdExt &left, const ObDocIdExt &right, int64_t &cmp_ret) const;
 protected:
   ObBM25ParamEstimator bm25_param_estimator_;
   sql::ObMatchAgainstMode mode_flag_;
