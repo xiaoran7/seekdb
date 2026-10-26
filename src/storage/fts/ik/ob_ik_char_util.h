@@ -52,6 +52,80 @@ public:
                                  const uint8_t char_len,
                                  CharType &type);
 
+  static OB_INLINE int fast_classify_utf8(
+      const char *input,
+      const int64_t rem_len,
+      int64_t &char_len,
+      CharType &type)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_UNLIKELY(rem_len <= 0 || OB_ISNULL(input))) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      const uint8_t *u = reinterpret_cast<const uint8_t *>(input);
+      const uint8_t b0 = u[0];
+      if (OB_LIKELY(b0 < 0x80)) {
+        char_len = 1;
+        if ((b0 >= 'a' && b0 <= 'z') || (b0 >= 'A' && b0 <= 'Z')) {
+          type = CharType::ENGLISH_LETTER;
+        } else if (b0 >= '0' && b0 <= '9') {
+          type = CharType::ARABIC_LETTER;
+        } else {
+          type = CharType::USELESS;
+        }
+      } else if ((b0 & 0xE0) == 0xC0) {
+        if (OB_LIKELY(rem_len >= 2 && (u[1] & 0xC0) == 0x80)) {
+          char_len = 2;
+          type = CharType::USELESS;
+        } else {
+          ret = OB_INVALID_ARGUMENT;
+        }
+      } else if ((b0 & 0xF0) == 0xE0) {
+        if (OB_LIKELY(rem_len >= 3 && (u[1] & 0xC0) == 0x80 && (u[2] & 0xC0) == 0x80)) {
+          char_len = 3;
+          const uint8_t b1 = u[1];
+          if ((b0 >= 0xE5 && b0 <= 0xE8)
+              || (0xE4 == b0 && b1 >= 0xB8)
+              || (0xE9 == b0)) {
+            type = CharType::CHINESE;
+          } else {
+            const ob_wc_t unicode = (static_cast<ob_wc_t>(b0 & 0x0F) << 12)
+                                  | (static_cast<ob_wc_t>(b1 & 0x3F) << 6)
+                                  | static_cast<ob_wc_t>(u[2] & 0x3F);
+            if ((unicode >= 0x3400 && unicode <= 0x4DBF) || (unicode >= 0xF900 && unicode <= 0xFAFF)) {
+              type = CharType::CHINESE;
+            } else if ((unicode >= 0xAC00 && unicode <= 0xD7AF)
+                       || (unicode >= 0x3040 && unicode <= 0x30FF)
+                       || (unicode >= 0x3130 && unicode <= 0x318F)
+                       || (unicode >= 0x31F0 && unicode <= 0x31FF)
+                       || (unicode >= 0x1100 && unicode <= 0x11FF)
+                       || (unicode >= 0xFF00 && unicode <= 0xFFEF)) {
+              type = CharType::OTHER_CJK;
+            } else if ((unicode >= 0xFF21 && unicode <= 0xFF3A) || (unicode >= 0xFF41 && unicode <= 0xFF5A)) {
+              type = CharType::ENGLISH_LETTER;
+            } else if (unicode >= 0xFF10 && unicode <= 0xFF19) {
+              type = CharType::ARABIC_LETTER;
+            } else {
+              type = CharType::USELESS;
+            }
+          }
+        } else {
+          ret = OB_INVALID_ARGUMENT;
+        }
+      } else if ((b0 & 0xF8) == 0xF0) {
+        if (OB_LIKELY(rem_len >= 4 && (u[1] & 0xC0) == 0x80 && (u[2] & 0xC0) == 0x80 && (u[3] & 0xC0) == 0x80)) {
+          char_len = 4;
+          type = CharType::USELESS;
+        } else {
+          ret = OB_INVALID_ARGUMENT;
+        }
+      } else {
+        ret = OB_INVALID_ARGUMENT;
+      }
+    }
+    return ret;
+  }
+
   static int check_cn_number(ObCollationType coll_type,
                              const char *input,
                              const uint8_t char_len,
@@ -364,6 +438,17 @@ inline int ObFTCharUtil::check_cn_number(ObCollationType coll_type,
                                          bool &is_cn_number)
 {
   int ret = OB_SUCCESS;
+  is_cn_number = false;
+  if (OB_LIKELY(3 == char_len && OB_NOT_NULL(input))) {
+    const uint8_t *u = reinterpret_cast<const uint8_t *>(input);
+    if (u[0] >= 0xE4 && u[0] <= 0xE9) {
+      const ob_wc_t unicode = (static_cast<ob_wc_t>(u[0] & 0x0F) << 12)
+                            | (static_cast<ob_wc_t>(u[1] & 0x3F) << 6)
+                            | static_cast<ob_wc_t>(u[2] & 0x3F);
+      is_cn_number = ObUnicodeBlockUtils::is_unicode_cn_number(unicode);
+      return ret;
+    }
+  }
   ObCharsetType cs_type = ObCharset::charset_type_by_coll(coll_type);
 
   switch (cs_type) {
@@ -458,6 +543,31 @@ inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, 
       type = CharType::ENGLISH_LETTER;
     } else if (ch >= '0' && ch <= '9') {
       type = CharType::ARABIC_LETTER;
+    }
+  } else if (CS_TYPE == CHARSET_UTF8MB4 && 3 == char_len && OB_NOT_NULL(input)) {
+    const uint8_t *u = reinterpret_cast<const uint8_t *>(input);
+    const uint8_t b0 = u[0];
+    const uint8_t b1 = u[1];
+    if ((b0 >= 0xE5 && b0 <= 0xE8) || (0xE4 == b0 && b1 >= 0xB8) || (0xE9 == b0)) {
+      type = CharType::CHINESE;
+    } else {
+      const ob_wc_t unicode = (static_cast<ob_wc_t>(b0 & 0x0F) << 12)
+                            | (static_cast<ob_wc_t>(b1 & 0x3F) << 6)
+                            | static_cast<ob_wc_t>(u[2] & 0x3F);
+      if ((unicode >= 0x3400 && unicode <= 0x4DBF) || (unicode >= 0xF900 && unicode <= 0xFAFF)) {
+        type = CharType::CHINESE;
+      } else if ((unicode >= 0xAC00 && unicode <= 0xD7AF)
+                 || (unicode >= 0x3040 && unicode <= 0x30FF)
+                 || (unicode >= 0x3130 && unicode <= 0x318F)
+                 || (unicode >= 0x31F0 && unicode <= 0x31FF)
+                 || (unicode >= 0x1100 && unicode <= 0x11FF)
+                 || (unicode >= 0xFF00 && unicode <= 0xFFEF)) {
+        type = CharType::OTHER_CJK;
+      } else if ((unicode >= 0xFF21 && unicode <= 0xFF3A) || (unicode >= 0xFF41 && unicode <= 0xFF5A)) {
+        type = CharType::ENGLISH_LETTER;
+      } else if (unicode >= 0xFF10 && unicode <= 0xFF19) {
+        type = CharType::ARABIC_LETTER;
+      }
     }
   } else {
     ob_wc_t unicode = 0;

@@ -102,6 +102,19 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
+  const int64_t rem = fulltext_len_ - cursor_;
+  if (OB_UNLIKELY(rem <= 0)) {
+    next_char_len_ = 0;
+    next_char_type_ = ObFTCharUtil::CharType::USELESS;
+  } else if (OB_LIKELY(coll_type_ == common::CS_TYPE_UTF8MB4_GENERAL_CI
+                    || coll_type_ == common::CS_TYPE_UTF8MB4_BIN)) {
+    if (OB_SUCC(ObFTCharUtil::fast_classify_utf8(fulltext_ + cursor_,
+                                                 rem,
+                                                 next_char_len_,
+                                                 next_char_type_))) {
+      return ret;
+    }
+  }
   if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
                                           fulltext_ + cursor_,
                                           fulltext_len_ - cursor_,
