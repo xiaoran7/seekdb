@@ -170,7 +170,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr,
     bool has_cur_group = false;
 
     auto flush_group = [&]() -> int {
-      int flush_ret = OB_SUCCESS;
+      int ret = OB_SUCCESS;
       if (batch_contents.count() > 0) {
         ObAIFuncExprInfo *info = nullptr;
         share::ObAiModelEndpointInfo resolved_endpoint;
@@ -180,34 +180,27 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr,
         ObJsonInt *dim_json = nullptr;
         if (cur_dim > 0) {
           if (OB_FAIL(ObAIFuncJsonUtils::get_json_object(temp_allocator, config))) {
-            flush_ret = ret;
           } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_int(temp_allocator, cur_dim, dim_json))) {
-            flush_ret = ret;
           } else if (OB_FAIL(config->add("dimensions", dim_json))) {
-            flush_ret = ret;
           }
         }
-        if (OB_SUCC(flush_ret)) {
+        if (OB_SUCC(ret)) {
           if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(temp_allocator, cur_model_id, info))) {
-            flush_ret = ret;
           } else if (OB_ISNULL(endpoint_resolver)) {
-            flush_ret = OB_ERR_UNEXPECTED;
+            ret = OB_ERR_UNEXPECTED;
           } else if (OB_FAIL(endpoint_resolver->resolve_by_model_name(
                          cur_model_id, temp_allocator, resolved_endpoint))) {
-            flush_ret = ret;
           } else {
             ObAIFuncModel model(temp_allocator, *info, resolved_endpoint);
             ObArray<ObString> results;
             if (OB_FAIL(model.call_dense_embedding_vector_v2(batch_contents, config, results))) {
-              flush_ret = ret;
             } else if (results.count() != batch_row_indices.count()) {
-              flush_ret = OB_ERR_UNEXPECTED;
+              ret = OB_ERR_UNEXPECTED;
             } else {
-              for (int64_t k = 0; OB_SUCC(flush_ret) && k < batch_row_indices.count(); ++k) {
+              for (int64_t k = 0; OB_SUCC(ret) && k < batch_row_indices.count(); ++k) {
                 const int64_t row_idx = batch_row_indices.at(k);
                 batch_info_guard.set_batch_idx(row_idx);
                 if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res[row_idx], results.at(k)))) {
-                  flush_ret = ret;
                 } else {
                   eval_flags.set(row_idx);
                 }
@@ -219,7 +212,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr,
         batch_contents.reset();
         has_cur_group = false;
       }
-      return flush_ret;
+      return ret;
     };
 
     for (int64_t j = 0; OB_SUCC(ret) && j < batch_size; ++j) {

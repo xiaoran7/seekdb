@@ -42,14 +42,21 @@ public:
   virtual bool need_rt_ctx() const override { return true; }
  
 private:
-  static int inner_eval_ai_rerank(common::ObIAllocator &allocator, 
-                                  const common::ObAIFuncExprInfo &info, 
+  static int inner_eval_ai_rerank(common::ObIAllocator &allocator,
+                                  const common::ObAIFuncExprInfo &info,
                                   const share::ObAiModelEndpointInfo &endpoint_info,
-                                  common::ObArray<common::ObString> &header_array, 
-                                  common::ObString &query, 
-                                  common::ObJsonArray *document_array, 
+                                  common::ObArray<common::ObString> &header_array,
+                                  common::ObString &query,
+                                  common::ObJsonArray *document_array,
                                   common::ObJsonArray *&result_array);
-  
+  static int rerank_documents(common::ObIAllocator &allocator,
+                              const common::ObAIFuncExprInfo &info,
+                              const share::ObAiModelEndpointInfo &endpoint_info,
+                              common::ObArray<common::ObString> &header_array,
+                              common::ObString &query,
+                              common::ObJsonArray *doc_text_array,
+                              common::ObJsonArray *&result_array);
+
   static int eval_ai_rerank_with_doc_key(const ObExpr &expr, ObEvalCtx &ctx, common::ObIAllocator &allocator,
                                          common::ObString &model_id, common::ObString &query, common::ObJsonArray *document_array,
                                          common::ObString &doc_key, const common::ObAIFuncExprInfo &info, const share::ObAiModelEndpointInfo &endpoint_info, ObDatum &res);
