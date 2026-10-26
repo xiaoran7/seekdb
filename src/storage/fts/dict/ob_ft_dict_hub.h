@@ -97,7 +97,13 @@ class ObFTCacheRangeContainer;
 class ObFTDictHub
 {
 public:
-  ObFTDictHub() : is_inited_(false), generation_epoch_(0), dict_map_(), rw_dict_lock_() {}
+  static constexpr int32_t FAST_DICT_TYPE_MAX = 4;
+  ObFTDictHub() : is_inited_(false), generation_epoch_(0), dict_map_(), rw_dict_lock_()
+  {
+    for (int i = 0; i < FAST_DICT_TYPE_MAX; ++i) {
+      fast_range_count_[i] = -1;
+    }
+  }
   ~ObFTDictHub() {}
 
   int init();
@@ -119,6 +125,7 @@ private:
 private:
   bool is_inited_;
   uint64_t generation_epoch_;
+  int32_t fast_range_count_[FAST_DICT_TYPE_MAX];
   // holds info of dict
   hash::ObHashMap<ObFTDictInfoKey, ObFTDictInfo> dict_map_;
   ObBucketLock rw_dict_lock_;

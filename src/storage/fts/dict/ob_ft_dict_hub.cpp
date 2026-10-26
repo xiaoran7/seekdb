@@ -45,6 +45,9 @@ int ObFTDictHub::destroy()
   int ret = OB_SUCCESS;
   dict_map_.destroy();
   rw_dict_lock_.destroy();
+  for (int i = 0; i < FAST_DICT_TYPE_MAX; ++i) {
+    ATOMIC_STORE(&fast_range_count_[i], -1);
+  }
   ATOMIC_STORE(&generation_epoch_, 0);
   is_inited_ = false;
   return ret;
@@ -91,12 +94,22 @@ int ObFTDictHub::build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &
 int ObFTDictHub::load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container)
 {
   int ret = OB_SUCCESS;
-  ObFTDictInfo info;
   container.reset();
-  ObFTDictInfoKey key(static_cast<uint64_t>(desc.type_));
-  if (!is_inited_) {
+  if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
   } else {
+    const uint32_t type_idx = static_cast<uint32_t>(desc.type_);
+    if (type_idx < FAST_DICT_TYPE_MAX) {
+      const int32_t fast_range = ATOMIC_LOAD(&fast_range_count_[type_idx]);
+      if (fast_range > 0) {
+        ret = ObFTRangeDict::try_load_cache(desc, fast_range, container);
+        if (OB_SUCC(ret)) {
+          return ret;
+        }
+      }
+    }
+    ObFTDictInfo info;
+    ObFTDictInfoKey key(static_cast<uint64_t>(desc.type_));
     {
       ObBucketHashRLockGuard guard(rw_dict_lock_, key.hash());
       if (OB_FAIL(get_dict_info(key, info))) {
@@ -108,10 +121,15 @@ int ObFTDictHub::load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &c
       }
     }
     if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(ObFTRangeDict::try_load_cache(desc, info.range_count_, container))) {
-      if (OB_ENTRY_NOT_EXIST == ret) {
-        // dict not exist, make new one, by caller
-      } else {
+    } else {
+      if (type_idx < FAST_DICT_TYPE_MAX && info.range_count_ > 0) {
+        ATOMIC_STORE(&fast_range_count_[type_idx], info.range_count_);
+      }
+      if (OB_FAIL(ObFTRangeDict::try_load_cache(desc, info.range_count_, container))) {
+        if (OB_ENTRY_NOT_EXIST == ret) {
+          // dict not exist, make new one, by caller
+        } else {
+        }
       }
     }
   }
@@ -137,6 +155,11 @@ int ObFTDictHub::put_dict_info(const ObFTDictInfoKey &key, const ObFTDictInfo &i
   int ret = OB_SUCCESS;
   const int cover_exist_flag = 1;
   if (OB_FAIL(dict_map_.set_refactored(key, info, cover_exist_flag))) {
+  } else {
+    const uint32_t type_idx = static_cast<uint32_t>(info.type_);
+    if (type_idx < FAST_DICT_TYPE_MAX && info.range_count_ > 0) {
+      ATOMIC_STORE(&fast_range_count_[type_idx], info.range_count_);
+    }
   }
 
   return ret;
