@@ -54,6 +54,13 @@ public:
   bool is_alter_triggers() const { return is_alter_triggers_; }
   void set_is_alter_triggers(const bool flag) { is_alter_triggers_ = flag; }
 
+  bool is_retry_ai_column() const { return is_retry_ai_column_; }
+  void set_is_retry_ai_column(const bool flag) { is_retry_ai_column_ = flag; }
+  const common::ObString &get_retry_ai_col_name() const { return retry_ai_col_name_; }
+  void set_retry_ai_col_name(const common::ObString &name) { retry_ai_col_name_ = name; }
+  const common::ObString &get_retry_where_pred() const { return retry_where_pred_; }
+  void set_retry_where_pred(const common::ObString &pred) { retry_where_pred_ = pred; }
+
   int set_origin_database_name(const common::ObString &origin_db_name);
   int set_origin_table_name(const common::ObString &origin_table_name);
   void set_table_id(const uint64_t table_id);
@@ -114,6 +121,9 @@ private:
   obcall::ObAlterTriggerArg tg_arg_;
   uint64_t alter_table_action_count_;
   obcall::ObExchangePartitionArg exchange_partition_arg_;
+  bool is_retry_ai_column_;
+  common::ObString retry_ai_col_name_;
+  common::ObString retry_where_pred_;
 };
 
 inline int ObAlterTableStmt::set_tz_info_wrap(const common::ObTimeZoneInfoWrap &tz_info_wrap)

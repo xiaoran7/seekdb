@@ -38,6 +38,8 @@
 #include "share/ob_global_stat_proxy.h"
 #include "rootserver/fork_table/ob_fork_table_util.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
+#include "share/ai_service/ob_ai_column_struct.h"
+#include "share/ai_service/ob_ai_column_proxy.h"
 #include "sql/resolver/expr/ob_raw_expr_modify_column_name.h"
 #include "rootserver/ob_ddl_service_launcher.h" // for ObDDLServiceLauncher
 #include "rootserver/ddl_task/ob_sys_ddl_util.h" // ObSysDDLSchedulerUtil
@@ -10923,6 +10925,54 @@ int ObDDLService::alter_table_in_trans(obcall::ObAlterTableArg &alter_table_arg,
                 } else {
                   res.task_id_ = task_record.task_id_;
                 }
+              }
+            }
+          }
+        }
+        if (OB_SUCC(ret) && alter_table_arg.ai_columns_.count() > 0) {
+          const uint64_t table_id = new_table_schema.get_table_id();
+          for (int64_t i = 0; OB_SUCC(ret) && i < alter_table_arg.ai_columns_.count(); ++i) {
+            const share::ObAiColumnDefinition &ai_def = alter_table_arg.ai_columns_.at(i);
+            const ObColumnSchemaV2 *col_schema = new_table_schema.get_column_schema(ai_def.column_name_);
+            if (OB_ISNULL(col_schema)) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("ai column schema not found in new_table_schema", K(ret), K(ai_def.column_name_));
+            } else {
+              share::ObAiColumnSchema ai_schema;
+              ai_schema.table_id_ = table_id;
+              ai_schema.column_id_ = col_schema->get_column_id();
+              ai_schema.column_name_ = ai_def.column_name_;
+              ai_schema.max_retries_ = ai_def.max_retries_;
+              ai_schema.sync_mode_ = ai_def.sync_mode_;
+              ai_schema.normalized_expr_ = ai_def.normalized_expr_;
+              ai_schema.column_flags_ = 0;
+
+              char state_col_name[OB_MAX_COLUMN_NAME_LENGTH];
+              snprintf(state_col_name, sizeof(state_col_name), "__ai_state_%.*s",
+                       ai_def.column_name_.length(), ai_def.column_name_.ptr());
+              const ObColumnSchemaV2 *state_col = new_table_schema.get_column_schema(state_col_name);
+              if (OB_NOT_NULL(state_col)) {
+                ai_schema.state_column_id_ = state_col->get_column_id();
+              }
+
+              char req_col_name[OB_MAX_COLUMN_NAME_LENGTH];
+              snprintf(req_col_name, sizeof(req_col_name), "__ai_request_%.*s",
+                       ai_def.column_name_.length(), ai_def.column_name_.ptr());
+              const ObColumnSchemaV2 *req_col = new_table_schema.get_column_schema(req_col_name);
+              if (OB_NOT_NULL(req_col)) {
+                ai_schema.request_column_id_ = req_col->get_column_id();
+              }
+
+              char spec_col_name[OB_MAX_COLUMN_NAME_LENGTH];
+              snprintf(spec_col_name, sizeof(spec_col_name), "__ai_result_spec_%.*s",
+                       ai_def.column_name_.length(), ai_def.column_name_.ptr());
+              const ObColumnSchemaV2 *spec_col = new_table_schema.get_column_schema(spec_col_name);
+              if (OB_NOT_NULL(spec_col)) {
+                ai_schema.result_spec_column_id_ = spec_col->get_column_id();
+              }
+
+              if (OB_FAIL(share::ObAiColumnProxy::insert_ai_column(trans, ai_schema))) {
+                LOG_WARN("failed to insert ai column in alter table", K(ret), K(ai_schema));
               }
             }
           }

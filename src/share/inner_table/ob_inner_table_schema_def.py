@@ -2468,6 +2468,68 @@ all_objauth_mysql_def = dict(
 def_table_schema(**all_objauth_mysql_def)
 def_table_schema(**gen_history_table_def(1134, all_objauth_mysql_def))
 
+# One row per AI column. `column_id` is the result column the user declared;
+# `state_column_id`, `request_column_id` and `result_spec_column_id` are the
+# three hidden columns the DDL adds alongside it. `request_id` groups the AI
+# columns of one row that share a single model request.
+all_ai_column_def = dict(
+    owner = 'seekdb',
+    table_name = '__all_ai_column',
+    table_id = '1136',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('column_id', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:OB_MAX_COLUMN_NAME_LENGTH', 'false'),
+        ('max_retries', 'int', 'false', 0),
+        ('sync_mode', 'varchar:16', 'true'),
+        ('state_column_id', 'int', 'false'),
+        ('request_column_id', 'int', 'false'),
+        ('result_spec_column_id', 'int', 'false'),
+        ('normalized_expr', 'longtext', 'true'),
+        ('column_flags', 'int', 'false', 0)
+    ]
+)
+def_table_schema(**all_ai_column_def)
+
+# The async work queue behind the AI columns. A task exists from the moment a
+# row's dependencies change until the model call has been applied or has
+# terminally failed; `request_id` is shared by every AI column of the same row
+# so that a single request updates them together.
+all_ai_column_task_def = dict(
+    owner = 'seekdb',
+    table_name = '__all_ai_column_task',
+    table_id = '1137',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('column_id', 'int'),
+      ('rowkey_hash', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('request_id', 'int', 'false'),
+        ('rowkey', 'longtext', 'true'),
+        ('rowkey_predicate', 'longtext', 'true'),
+        ('state', 'int', 'false', 0),
+        ('retry_count', 'int', 'false', 0),
+        ('eligible_ts', 'int', 'false', 0),
+        ('lease_ts', 'int', 'false', 0),
+        ('request', 'longtext', 'true'),
+        ('ret_code', 'int', 'false', 0),
+        ('trace_id', 'varchar:OB_MAX_ERROR_MSG_LEN', 'true')
+    ]
+)
+def_table_schema(**all_ai_column_task_def)
+
+
 
 # Reserved position (placeholder before this line)
 # Placeholder suggestion for this section: Use actual table names for placeholders

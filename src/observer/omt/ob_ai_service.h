@@ -24,11 +24,25 @@
 #include "sql/privilege_check/ob_ai_model_priv_util.h"
 #include "share/ob_server_struct.h"
 #include "lib/worker.h"
+#include "lib/task/ob_timer.h"
 
 namespace oceanbase
 {
 namespace omt
 {
+
+class ObAiColumnWorkerTask : public common::ObTimerTask
+{
+public:
+  ObAiColumnWorkerTask();
+  virtual ~ObAiColumnWorkerTask() = default;
+  int init();
+  virtual void runTimerTask() override;
+  int do_work();
+private:
+  bool inited_;
+  bool is_running_;
+};
 
 class ObAiServiceGuard
 {
@@ -50,14 +64,16 @@ public:
   virtual ~ObAiService();
   static int server_module_init(ObAiService* &ai_service);
   int init();
-  int start() { return OB_SUCCESS; }
-  void stop() {};
-  void wait() {};
+  int start();
+  void stop();
+  void wait();
   void destroy();
 public:
   int get_ai_service_guard(ObAiServiceGuard &ai_service_guard);
 private:
   bool is_inited_;
+  common::ObTimer timer_;
+  ObAiColumnWorkerTask worker_task_;
   DISALLOW_COPY_AND_ASSIGN(ObAiService);
 };
 

@@ -34,6 +34,10 @@
 #include "sql/engine/ob_batch_rows.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "share/ai_service/ob_ai_column_struct.h"
+#include "share/ai_service/ob_ai_column_proxy.h"
+#include "share/schema/ob_table_schema.h"
+#include "share/schema/ob_column_schema.h"
 namespace oceanbase
 {
 using namespace common;
@@ -629,6 +633,8 @@ int ObDMLService::process_insert_row(const ObInsCtDef &ins_ctdef,
                                       ins_ctdef.is_single_value_,
                                       dml_op))) {
     } else if (OB_FAIL(check_filter_row(ins_ctdef, dml_op.get_eval_ctx(), is_skipped))) {
+    } else if (!is_skipped && OB_FAIL(handle_ai_column_insert(ins_ctdef, dml_op))) {
+      LOG_WARN("failed to handle ai column insert", K(ret));
     }
 
   }
@@ -728,6 +734,8 @@ int ObDMLService::process_delete_row(const ObDelCtDef &del_ctdef,
         dml_op.get_eval_ctx(), del_ctdef.trig_ctdef_, del_rtdef.trig_rtdef_))) {
       } else if (OB_FAIL(TriggerHandle::do_handle_before_row(
           dml_op, del_ctdef.das_base_ctdef_, del_ctdef.trig_ctdef_, del_rtdef.trig_rtdef_))) {
+      } else if (OB_FAIL(handle_ai_column_delete(del_ctdef, dml_op))) {
+        LOG_WARN("failed to handle ai column delete", K(ret));
       }
     }
     LOG_DEBUG("process delete row", K(ret), K(is_skipped),
@@ -828,9 +836,13 @@ int ObDMLService::process_update_row(const ObUpdCtDef &upd_ctdef,
   }
 
   if (OB_SUCC(ret) && !is_skipped) {
-    LOG_DEBUG("process update row", K(ret), K(is_skipped), K(upd_ctdef), K(upd_rtdef),
-                "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.old_row_),
-                "new_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.new_row_));
+    if (upd_ctdef.is_primary_index_ && OB_FAIL(handle_ai_column_update(upd_ctdef, upd_rtdef, dml_op))) {
+      LOG_WARN("failed to handle ai column update", K(ret));
+    } else {
+      LOG_DEBUG("process update row", K(ret), K(is_skipped), K(upd_ctdef), K(upd_rtdef),
+                  "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.old_row_),
+                  "new_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.new_row_));
+    }
   }
   return ret;
 }
@@ -2378,6 +2390,333 @@ int ObDMLService::get_root_exec_ctx_for_fk_cascading(ObExecContext *ctx, ObExecC
     // may be trigger or PL instead, create hash set at current ctx to perform duplicate rowkey check
     needed_ctx = ctx;
   } else if (OB_FAIL(SMART_CALL(get_root_exec_ctx_for_fk_cascading(parent_ctx, needed_ctx)))) {
+  }
+  return ret;
+}
+
+int ObDMLService::handle_ai_column_insert(const ObInsCtDef &ins_ctdef, ObTableModifyOp &dml_op)
+{
+  int ret = OB_SUCCESS;
+  ObExecContext &exec_ctx = dml_op.get_exec_ctx();
+  ObSQLSessionInfo *session = exec_ctx.get_my_session();
+  share::schema::ObSchemaGetterGuard *schema_guard = exec_ctx.get_sql_ctx() != nullptr ?
+      exec_ctx.get_sql_ctx()->schema_guard_ : nullptr;
+  uint64_t table_id = ins_ctdef.das_base_ctdef_.index_tid_;
+  const share::schema::ObTableSchema *table_schema = nullptr;
+
+  if (OB_ISNULL(session) || OB_ISNULL(schema_guard)) {
+    // skip
+  } else if (OB_FAIL(schema_guard->get_table_schema(table_id, table_schema))) {
+  } else if (OB_ISNULL(table_schema) || table_schema->is_sys_table()) {
+    // skip
+  } else {
+    ObSEArray<uint64_t, 4> ai_col_ids;
+    for (int64_t i = 0; i < table_schema->get_column_count(); ++i) {
+      const share::schema::ObColumnSchemaV2 *c = table_schema->get_column_schema_by_idx(i);
+      if (OB_NOT_NULL(c) && !c->is_hidden()) {
+        char sname[OB_MAX_COLUMN_NAME_LENGTH];
+        snprintf(sname, sizeof(sname), "__ai_state_%.*s",
+                 c->get_column_name_str().length(), c->get_column_name_str().ptr());
+        if (nullptr != table_schema->get_column_schema(sname)) {
+          ai_col_ids.push_back(c->get_column_id());
+        }
+      }
+    }
+    if (!ai_col_ids.empty()) {
+      const share::schema::ObColumnSchemaV2 *pk_col = nullptr;
+      for (int64_t i = 0; i < table_schema->get_column_count(); ++i) {
+        const share::schema::ObColumnSchemaV2 *c = table_schema->get_column_schema_by_idx(i);
+        if (OB_NOT_NULL(c) && c->is_rowkey_column()) {
+          pk_col = c;
+          break;
+        }
+      }
+      if (OB_NOT_NULL(pk_col)) {
+        int64_t pk_proj_idx = -1;
+        for (int64_t i = 0; i < ins_ctdef.column_ids_.count(); ++i) {
+          if (ins_ctdef.column_ids_.at(i) == pk_col->get_column_id()) {
+            pk_proj_idx = i;
+            break;
+          }
+        }
+        if (pk_proj_idx < 0 && ins_ctdef.new_row_.count() > 0) {
+          pk_proj_idx = 0;
+        }
+        if (pk_proj_idx >= 0 && pk_proj_idx < ins_ctdef.new_row_.count()) {
+          ObDatum *pk_datum = nullptr;
+          if (OB_FAIL(ins_ctdef.new_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), pk_datum))) {
+          } else if (OB_NOT_NULL(pk_datum) && !pk_datum->is_null()) {
+            int64_t pk_val = pk_datum->get_int();
+            char pred_buf[128];
+            snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
+                     pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), pk_val);
+            uint64_t rowkey_hash = static_cast<uint64_t>(pk_val);
+            uint64_t req_id = ObTimeUtility::current_time() ^ (rowkey_hash << 16);
+            if (OB_FAIL(dml_op.open_inner_conn())) {
+            } else {
+              for (int64_t a = 0; OB_SUCC(ret) && a < ai_col_ids.count(); ++a) {
+                ObSqlString sql;
+                if (OB_FAIL(sql.assign_fmt(
+                    "INSERT INTO oceanbase.__all_ai_column_task "
+                    "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
+                    "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '', 0, '')",
+                    table_id, ai_col_ids.at(a), rowkey_hash, req_id, pk_val, pred_buf))) {
+                } else if (OB_FAIL(dml_op.execute_write(sql.ptr()))) {
+                  LOG_WARN("failed to insert ai column task", K(ret), K(sql));
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDMLService::handle_ai_column_delete(const ObDelCtDef &del_ctdef, ObTableModifyOp &dml_op)
+{
+  int ret = OB_SUCCESS;
+  ObExecContext &exec_ctx = dml_op.get_exec_ctx();
+  ObSQLSessionInfo *session = exec_ctx.get_my_session();
+  share::schema::ObSchemaGetterGuard *schema_guard = exec_ctx.get_sql_ctx() != nullptr ?
+      exec_ctx.get_sql_ctx()->schema_guard_ : nullptr;
+  uint64_t table_id = del_ctdef.das_base_ctdef_.index_tid_;
+  const share::schema::ObTableSchema *table_schema = nullptr;
+
+  if (OB_ISNULL(session) || OB_ISNULL(schema_guard)) {
+    // skip
+  } else if (OB_FAIL(schema_guard->get_table_schema(table_id, table_schema))) {
+  } else if (OB_ISNULL(table_schema) || table_schema->is_sys_table()) {
+    // skip
+  } else {
+    bool has_ai = false;
+    for (int64_t i = 0; !has_ai && i < table_schema->get_column_count(); ++i) {
+      const share::schema::ObColumnSchemaV2 *c = table_schema->get_column_schema_by_idx(i);
+      if (OB_NOT_NULL(c) && !c->is_hidden()) {
+        char sname[OB_MAX_COLUMN_NAME_LENGTH];
+        snprintf(sname, sizeof(sname), "__ai_state_%.*s",
+                 c->get_column_name_str().length(), c->get_column_name_str().ptr());
+        if (nullptr != table_schema->get_column_schema(sname)) {
+          has_ai = true;
+        }
+      }
+    }
+    if (has_ai) {
+      const share::schema::ObColumnSchemaV2 *pk_col = nullptr;
+      for (int64_t i = 0; i < table_schema->get_column_count(); ++i) {
+        const share::schema::ObColumnSchemaV2 *c = table_schema->get_column_schema_by_idx(i);
+        if (OB_NOT_NULL(c) && c->is_rowkey_column()) {
+          pk_col = c;
+          break;
+        }
+      }
+      if (OB_NOT_NULL(pk_col)) {
+        int64_t pk_proj_idx = -1;
+        for (int64_t i = 0; i < del_ctdef.column_ids_.count(); ++i) {
+          if (del_ctdef.column_ids_.at(i) == pk_col->get_column_id()) {
+            pk_proj_idx = i;
+            break;
+          }
+        }
+        if (pk_proj_idx < 0 && del_ctdef.old_row_.count() > 0) {
+          pk_proj_idx = 0;
+        }
+        if (pk_proj_idx >= 0 && pk_proj_idx < del_ctdef.old_row_.count()) {
+          ObDatum *pk_datum = nullptr;
+          if (OB_FAIL(del_ctdef.old_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), pk_datum))) {
+          } else if (OB_NOT_NULL(pk_datum) && !pk_datum->is_null()) {
+            int64_t pk_val = pk_datum->get_int();
+            char pred_buf[128];
+            snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
+                     pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), pk_val);
+            if (OB_FAIL(dml_op.open_inner_conn())) {
+            } else {
+              ObSqlString sql;
+              if (OB_FAIL(sql.assign_fmt(
+                  "DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND rowkey_predicate = '%s'",
+                  table_id, pred_buf))) {
+              } else if (OB_FAIL(dml_op.execute_write(sql.ptr()))) {
+                LOG_WARN("failed to delete ai column task", K(ret), K(sql));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+static bool check_column_in_normalized_expr(const ObString &col_name, const ObString &expr)
+{
+  bool found = false;
+  if (!col_name.empty() && !expr.empty()) {
+    const char *p = expr.ptr();
+    int32_t len = expr.length();
+    int32_t c_len = col_name.length();
+    for (int32_t i = 0; !found && i + c_len <= len; ++i) {
+      if (0 == strncasecmp(p + i, col_name.ptr(), c_len)) {
+        bool left_ok = (i == 0 || (!isalnum(p[i - 1]) && p[i - 1] != '_' && p[i - 1] != '`'));
+        bool right_ok = (i + c_len == len || (!isalnum(p[i + c_len]) && p[i + c_len] != '_' && p[i + c_len] != '`'));
+        if (left_ok && right_ok) {
+          found = true;
+        }
+      }
+    }
+  }
+  return found;
+}
+
+int ObDMLService::handle_ai_column_update(const ObUpdCtDef &upd_ctdef, ObUpdRtDef &upd_rtdef, ObTableModifyOp &dml_op)
+{
+  int ret = OB_SUCCESS;
+  ObExecContext &exec_ctx = dml_op.get_exec_ctx();
+  ObSQLSessionInfo *session = exec_ctx.get_my_session();
+  share::schema::ObSchemaGetterGuard *schema_guard = exec_ctx.get_sql_ctx() != nullptr ?
+      exec_ctx.get_sql_ctx()->schema_guard_ : nullptr;
+  uint64_t table_id = upd_ctdef.das_base_ctdef_.index_tid_;
+  const share::schema::ObTableSchema *table_schema = nullptr;
+
+  if (OB_ISNULL(session) || OB_ISNULL(schema_guard)) {
+    // skip
+  } else if (OB_FAIL(schema_guard->get_table_schema(table_id, table_schema))) {
+  } else if (OB_ISNULL(table_schema) || table_schema->is_sys_table()) {
+    // skip
+  } else {
+    struct AiMetaItem {
+      uint64_t column_id_;
+      ObString column_name_;
+      ObString normalized_expr_;
+    };
+    ObSEArray<AiMetaItem, 4> ai_items;
+    common::ObMySQLProxy *sql_proxy = exec_ctx.get_sql_proxy();
+    for (int64_t i = 0; i < table_schema->get_column_count(); ++i) {
+      const share::schema::ObColumnSchemaV2 *c = table_schema->get_column_schema_by_idx(i);
+      if (OB_NOT_NULL(c) && !c->is_hidden()) {
+        char sname[OB_MAX_COLUMN_NAME_LENGTH];
+        snprintf(sname, sizeof(sname), "__ai_state_%.*s",
+                 c->get_column_name_str().length(), c->get_column_name_str().ptr());
+        if (nullptr != table_schema->get_column_schema(sname)) {
+          AiMetaItem item;
+          item.column_id_ = c->get_column_id();
+          item.column_name_ = c->get_column_name_str();
+          if (OB_NOT_NULL(sql_proxy)) {
+            share::ObAiColumnSchema schema;
+            if (OB_SUCC(share::ObAiColumnProxy::load_ai_column(*sql_proxy, exec_ctx.get_allocator(),
+                                                               table_id, item.column_id_, schema))) {
+              item.normalized_expr_ = schema.normalized_expr_;
+            }
+          }
+          ai_items.push_back(item);
+        }
+      }
+    }
+    if (!ai_items.empty()) {
+      const share::schema::ObColumnSchemaV2 *pk_col = nullptr;
+      for (int64_t i = 0; i < table_schema->get_column_count(); ++i) {
+        const share::schema::ObColumnSchemaV2 *c = table_schema->get_column_schema_by_idx(i);
+        if (OB_NOT_NULL(c) && c->is_rowkey_column()) {
+          pk_col = c;
+          break;
+        }
+      }
+      if (OB_NOT_NULL(pk_col)) {
+        int64_t old_pk_val = 0;
+        int64_t new_pk_val = 0;
+        bool pk_changed = false;
+        ObDatum *old_datum = nullptr;
+        ObDatum *new_datum = nullptr;
+        int64_t pk_proj_idx = -1;
+        for (int64_t i = 0; i < upd_ctdef.column_ids_.count(); ++i) {
+          if (upd_ctdef.column_ids_.at(i) == pk_col->get_column_id()) {
+            pk_proj_idx = i;
+            break;
+          }
+        }
+        if (pk_proj_idx < 0) {
+          pk_proj_idx = 0;
+        }
+        if (pk_proj_idx >= 0 && pk_proj_idx < upd_ctdef.old_row_.count() &&
+            OB_SUCC(upd_ctdef.old_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), old_datum)) &&
+            OB_NOT_NULL(old_datum) && !old_datum->is_null()) {
+          old_pk_val = old_datum->get_int();
+        }
+        if (pk_proj_idx >= 0 && pk_proj_idx < upd_ctdef.new_row_.count() &&
+            OB_SUCC(upd_ctdef.new_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), new_datum)) &&
+            OB_NOT_NULL(new_datum) && !new_datum->is_null()) {
+          new_pk_val = new_datum->get_int();
+        }
+        if (old_pk_val != 0 && new_pk_val != 0 && old_pk_val != new_pk_val) {
+          pk_changed = true;
+        }
+
+        if (pk_changed) {
+          if (OB_FAIL(dml_op.open_inner_conn())) {
+          } else {
+            char old_pred_buf[128];
+            snprintf(old_pred_buf, sizeof(old_pred_buf), "`%.*s` = %ld",
+                     pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), old_pk_val);
+            ObSqlString del_sql;
+            del_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND rowkey_predicate = '%s'",
+                               table_id, old_pred_buf);
+            dml_op.execute_write(del_sql.ptr());
+
+            char new_pred_buf[128];
+            snprintf(new_pred_buf, sizeof(new_pred_buf), "`%.*s` = %ld",
+                     pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), new_pk_val);
+            uint64_t rowkey_hash = static_cast<uint64_t>(new_pk_val);
+            uint64_t req_id = ObTimeUtility::current_time() ^ (rowkey_hash << 16);
+            for (int64_t a = 0; a < ai_items.count(); ++a) {
+              ObSqlString ins_sql;
+              ins_sql.assign_fmt(
+                  "INSERT INTO oceanbase.__all_ai_column_task "
+                  "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
+                  "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '', 0, '')",
+                  table_id, ai_items.at(a).column_id_, rowkey_hash, req_id, new_pk_val, new_pred_buf);
+              dml_op.execute_write(ins_sql.ptr());
+            }
+          }
+        } else {
+          // Check if any dependent column for each AI column changed
+          char pred_buf[128];
+          snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
+                   pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), old_pk_val);
+          uint64_t rowkey_hash = static_cast<uint64_t>(old_pk_val);
+          uint64_t req_id = ObTimeUtility::current_time() ^ (rowkey_hash << 16);
+
+          for (int64_t a = 0; a < ai_items.count(); ++a) {
+            bool dep_changed = false;
+            const AiMetaItem &ai_item = ai_items.at(a);
+            for (int64_t i = 0; !dep_changed && i < upd_ctdef.assign_columns_.count(); ++i) {
+              const ObString &cname = upd_ctdef.assign_columns_.at(i).column_name_;
+              if (!cname.empty() && !cname.prefix_match("__ai_")) {
+                if (ai_item.normalized_expr_.empty() ||
+                    check_column_in_normalized_expr(cname, ai_item.normalized_expr_)) {
+                  dep_changed = true;
+                }
+              }
+            }
+            if (dep_changed) {
+              if (OB_SUCC(dml_op.open_inner_conn())) {
+                ObSqlString del_sql;
+                del_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate = '%s'",
+                                   table_id, ai_item.column_id_, pred_buf);
+                dml_op.execute_write(del_sql.ptr());
+
+                ObSqlString ins_sql;
+                ins_sql.assign_fmt(
+                    "INSERT INTO oceanbase.__all_ai_column_task "
+                    "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
+                    "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '', 0, '')",
+                    table_id, ai_item.column_id_, rowkey_hash, req_id, old_pk_val, pred_buf);
+                dml_op.execute_write(ins_sql.ptr());
+              }
+            }
+          }
+        }
+      }
+    }
   }
   return ret;
 }

@@ -17,6 +17,8 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_explain_resolver.h"
 #include "sql/resolver/ob_resolver.h"
+#include "sql/resolver/dml/ob_select_resolver.h"
+#include "sql/parser/ob_parser.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -62,6 +64,68 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
       } else if (OB_ISNULL(child_stmt)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("failed to generate stmt for child stmt");
+      } else if (1 == parse_tree.value_ && child_stmt->is_select_stmt() &&
+                 OB_NOT_NULL(allocator_) && OB_NOT_NULL(session_info_)) {
+        // DuckDB DESCRIBE query: DESCRIBE SELECT ...
+        // Produces: column_name | column_type | null | key | default | extra
+        ObSelectStmt *select_stmt = static_cast<ObSelectStmt *>(child_stmt);
+        ObSqlString sql;
+        for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+          const SelectItem &item = select_stmt->get_select_item(i);
+          ObString col_name = !item.alias_name_.empty() ? item.alias_name_ : item.expr_name_;
+          if (col_name.empty() && OB_NOT_NULL(item.expr_) && item.expr_->is_column_ref_expr()) {
+            col_name = static_cast<const ObColumnRefRawExpr *>(item.expr_)->get_column_name();
+          }
+          const char *type_name = "VARCHAR";
+          ObObjType obj_t = item.expr_ ? item.expr_->get_data_type() : ObNullType;
+          if (ObIntType == obj_t || ObUInt64Type == obj_t || ObInt32Type == obj_t ||
+              ObSmallIntType == obj_t || ObMediumIntType == obj_t) {
+            type_name = "BIGINT";
+          } else if (ObTinyIntType == obj_t || ObUTinyIntType == obj_t) {
+            type_name = "BOOLEAN";
+          } else if (ObDoubleType == obj_t || ObUDoubleType == obj_t) {
+            type_name = "DOUBLE";
+          } else if (ObFloatType == obj_t || ObUFloatType == obj_t) {
+            type_name = "FLOAT";
+          } else if (ObDateType == obj_t) {
+            type_name = "DATE";
+          } else if (ObDateTimeType == obj_t || ObTimestampType == obj_t) {
+            type_name = "DATETIME";
+          } else if (ObDecimalIntType == obj_t || ObNumberType == obj_t) {
+            type_name = "DECIMAL";
+          } else {
+            type_name = "VARCHAR";
+          }
+          const char *is_null = (item.expr_ && item.expr_->get_result_type().has_result_flag(NOT_NULL_FLAG))
+              ? "NO" : "YES";
+          if (0 == i) {
+            if (OB_FAIL(sql.assign_fmt(
+                "SELECT '%.*s' AS `column_name`, '%s' AS `column_type`, '%s' AS `null`, "
+                "CAST(NULL AS CHAR) AS `key`, CAST(NULL AS CHAR) AS `default`, CAST(NULL AS CHAR) AS `extra`",
+                col_name.length(), col_name.ptr(), type_name, is_null))) {
+            }
+          } else {
+            if (OB_FAIL(sql.append_fmt(
+                " UNION ALL SELECT '%.*s', '%s', '%s', NULL, NULL, NULL",
+                col_name.length(), col_name.ptr(), type_name, is_null))) {
+            }
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ParseResult select_result;
+          ObParser parser(*allocator_, session_info_->get_sql_mode());
+          if (OB_FAIL(parser.parse(sql.string(), select_result))) {
+          } else if (OB_ISNULL(select_result.result_tree_) ||
+                     OB_ISNULL(select_result.result_tree_->children_[0])) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            ObSelectResolver select_resolver(params_);
+            if (OB_FAIL(select_resolver.resolve(*select_result.result_tree_->children_[0]))) {
+            } else {
+              stmt_ = select_resolver.get_stmt();
+            }
+          }
+        }
       } else {
         explain_stmt->set_explain_query_stmt(static_cast<ObDMLStmt *>(child_stmt));
         ParseNode *format = parse_tree.children_[EXPLAIN_FORMAT];

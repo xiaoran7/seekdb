@@ -26,6 +26,7 @@
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
+#include "share/ai_service/ob_ai_column_proxy.h"
 
 using namespace oceanbase::lib;
 using namespace oceanbase::common;
@@ -878,6 +879,25 @@ int ObCreateTableHelper::clean_on_fail_commit_()
 int ObCreateTableHelper::operation_before_commit_() {
   int ret = OB_SUCCESS;
   if (OB_FAIL(check_inner_stat_())) {
+  } else if (new_tables_.count() > 0 && arg_.ai_columns_.count() > 0) {
+    const uint64_t table_id = new_tables_.at(0).get_table_id();
+    for (int64_t i = 0; OB_SUCC(ret) && i < arg_.ai_columns_.count(); ++i) {
+      const share::ObAiColumnDefinition &ai_def = arg_.ai_columns_.at(i);
+      share::ObAiColumnSchema ai_schema;
+      ai_schema.table_id_ = table_id;
+      ai_schema.column_id_ = ai_def.column_id_;
+      ai_schema.column_name_ = ai_def.column_name_;
+      ai_schema.max_retries_ = ai_def.max_retries_;
+      ai_schema.sync_mode_ = ai_def.sync_mode_;
+      ai_schema.state_column_id_ = ai_def.state_column_id_;
+      ai_schema.request_column_id_ = ai_def.request_column_id_;
+      ai_schema.result_spec_column_id_ = ai_def.result_spec_column_id_;
+      ai_schema.normalized_expr_ = ai_def.normalized_expr_;
+      ai_schema.column_flags_ = 0;
+      if (OB_FAIL(share::ObAiColumnProxy::insert_ai_column(get_trans_(), ai_schema))) {
+        LOG_WARN("failed to insert ai column", K(ret), K(ai_schema));
+      }
+    }
   }
   return ret;
 }

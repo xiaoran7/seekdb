@@ -326,6 +326,7 @@ int ObCreateTableArg::assign(const ObCreateTableArg &other)
   OZ(error_info_.assign(other.error_info_));
   OX(is_alter_view_ = other.is_alter_view_);
   OZ(dep_infos_.assign(other.dep_infos_));
+  OZ(ai_columns_.assign(other.ai_columns_));
 
   return ret;
 }
@@ -344,7 +345,8 @@ DEF_TO_STRING(ObCreateTableArg)
        K_(is_inner),
        K_(error_info),
        K_(is_alter_view),
-       K_(dep_infos));
+       K_(dep_infos),
+       K_(ai_columns));
   J_OBJ_END();
   return pos;
 }
@@ -360,7 +362,8 @@ OB_SERIALIZE_MEMBER((ObCreateTableArg, ObDDLArg),
                     is_inner_,
                     error_info_,
                     is_alter_view_,
-                    dep_infos_);
+                    dep_infos_,
+                    ai_columns_);
 
 OB_SERIALIZE_MEMBER(ObCreateTableRes, table_id_, schema_version_, task_id_, do_nothing_);
 
@@ -769,7 +772,8 @@ OB_DEF_SERIALIZE(ObAlterTableArg)
               lock_priority_);
 
   LST_DO_CODE(OB_UNIS_ENCODE,
-              data_version_);
+              data_version_,
+              ai_columns_);
 
   return ret;
 }
@@ -818,7 +822,8 @@ OB_DEF_DESERIALIZE(ObAlterTableArg)
               lock_priority_);
 
   LST_DO_CODE(OB_UNIS_DECODE,
-              data_version_);
+              data_version_,
+              ai_columns_);
   return ret;
 }
 
@@ -859,7 +864,8 @@ OB_DEF_SERIALIZE_SIZE(ObAlterTableArg)
                 lock_session_id_,
                 lock_session_create_ts_,
                 lock_priority_,
-                data_version_);
+                data_version_,
+                ai_columns_);
   }
 
   if (OB_FAIL(ret)) {

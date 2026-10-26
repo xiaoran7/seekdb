@@ -75,6 +75,10 @@ struct ObColumnResolveStat
     is_set_null_ = false;
     is_set_not_null_ = false;
     is_set_default_value_ = false;
+    is_ai_column_ = false;
+    ai_max_retries_ = 0;
+    ai_sync_mode_ = 0;
+    ai_normalized_expr_.reset();
   }
   int64_t to_string(char *buf, const int64_t buf_len) const
   {
@@ -86,7 +90,10 @@ struct ObColumnResolveStat
          K(is_set_null_),
          K(is_set_not_null_),
          K(is_set_default_value_),
-         K(is_unique_key_));
+         K(is_unique_key_),
+         K(is_ai_column_),
+         K(ai_max_retries_),
+         K(ai_sync_mode_));
     J_OBJ_END();
     return pos;
   }
@@ -97,6 +104,13 @@ struct ObColumnResolveStat
   bool is_set_not_null_;
   bool is_set_default_value_;
   bool is_unique_key_;
+  // Set when the column was declared `AI COLUMN (...) WITH (...)`. The
+  // normalized expression is kept in ObCreateTableStmt/ObAlterTableStmt, keyed
+  // by column id, because this struct is copied by value.
+  bool is_ai_column_;
+  int64_t ai_max_retries_;
+  int64_t ai_sync_mode_;
+  common::ObString ai_normalized_expr_;
 };
 
 struct ObDefaultValueRes
@@ -547,6 +561,19 @@ protected:
                                          ObColumnResolveStat &reslove_stat);
   int resolve_srid_node(share::schema::ObColumnSchemaV2 &column,
                         const ParseNode &srid_node);
+  // Resolves `AI COLUMN (<expr>) WITH (...)` on a column definition: validates
+  // the expression against the column type, records the retry/sync options on
+  // `resolve_stat`, and stores the normalized expression on the statement so
+  // that the DDL service can write __all_ai_column.
+  int resolve_ai_column_attribute(share::schema::ObColumnSchemaV2 &column,
+                                  const ParseNode &ai_column_node,
+                                  ObColumnResolveStat &resolve_stat);
+  int resolve_ai_column_with_options(const ParseNode *with_node,
+                                     int64_t &max_retries,
+                                     int64_t &sync_mode);
+  int normalize_ai_column_expr(const share::schema::ObColumnSchemaV2 &column,
+                               const ParseNode &expr_node,
+                               ObString &normalized_expr);
   int resolve_column_skip_index(
       const ParseNode &skip_index_node,
       share::schema::ObColumnSchemaV2 &column_schema);

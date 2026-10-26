@@ -481,6 +481,26 @@ int ObDelUpdResolver::check_update_vector_col_with_vector_index(const ObTableSch
   return ret;
 }
 
+static bool check_column_in_ai_expr(const ObString &col_name, const ObString &expr)
+{
+  bool found = false;
+  if (!col_name.empty() && !expr.empty()) {
+    const char *p = expr.ptr();
+    int32_t len = expr.length();
+    int32_t c_len = col_name.length();
+    for (int32_t i = 0; !found && i + c_len <= len; ++i) {
+      if (0 == strncasecmp(p + i, col_name.ptr(), c_len)) {
+        bool left_ok = (i == 0 || (!isalnum(p[i - 1]) && p[i - 1] != '_' && p[i - 1] != '`'));
+        bool right_ok = (i + c_len == len || (!isalnum(p[i + c_len]) && p[i + c_len] != '_' && p[i + c_len] != '`'));
+        if (left_ok && right_ok) {
+          found = true;
+        }
+      }
+    }
+  }
+  return found;
+}
+
 int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment> &assigns,
                                                      const ObStmtScope scope)
 {
@@ -534,38 +554,105 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                                  trigger_exist,
                                                  *column_schema,
                                                  need_assigned))) {
-        } else if (FALSE_IT(need_assigned = need_assigned || 
+        } else if (FALSE_IT(need_assigned = need_assigned ||
                                             ((column_schema->is_vec_hnsw_vid_column() ||
-                                              column_schema->is_vec_ivf_center_id_column()) && 
+                                              column_schema->is_vec_ivf_center_id_column()) &&
                                              (update_with_vector_index || T_INSERT_SCOPE == scope)))) {
-        } else if (need_assigned) {
-          // for insert scope, on duplicate key update column list already
-          // exists in insert list, therefore, only need to add assignment.
-          // add assign
-          ObAssignment assignment;
-          ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
-          if (OB_FAIL(add_column_to_stmt(*table_item, *column_schema, col_exprs))) {
-          } else if (col_exprs.empty()) {
-            ret = OB_ERR_UNEXPECTED;
-          } else if (OB_ISNULL(col_item = stmt->get_column_item_by_id(
-              table_item->table_id_, col_exprs.at(0)->get_column_id()))) {
-            ret = OB_ERR_UNEXPECTED;
-          } else {
-            assignment.column_expr_ = col_item->expr_;
-            assignment.is_implicit_ = true;
-            if (column_schema->is_on_update_current_timestamp()) {
-              assignment.column_expr_->set_result_flag(ON_UPDATE_NOW_FLAG);
-              ObDefaultValueUtils utils(stmt, &params_, this);
-              if (OB_FAIL(utils.build_now_expr(col_item, assignment.expr_))) {
-              }
-            } else if (column_schema->is_generated_column()) {
-              if (OB_FAIL(copy_schema_expr(*params_.expr_factory_,
-                                           col_item->expr_->get_dependant_expr(),
-                                           assignment.expr_))) {
-              }
-            } else if (trigger_exist) {
-              assignment.expr_ = col_item->expr_;
+        } else {
+          bool is_ai_col = false;
+          bool is_ai_state_col = false;
+          if (!column_schema->is_hidden()) {
+            char sname[OB_MAX_COLUMN_NAME_LENGTH];
+            snprintf(sname, sizeof(sname), "__ai_state_%.*s",
+                     column_schema->get_column_name_str().length(), column_schema->get_column_name_str().ptr());
+            if (nullptr != table_schema->get_column_schema(sname)) {
+              is_ai_col = true;
             }
+          } else if (column_schema->get_column_name_str().prefix_match("__ai_state_")) {
+            is_ai_state_col = true;
+          }
+
+          if (is_ai_col || is_ai_state_col) {
+            bool already_assigned = false;
+            if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns.at(i).assignments_,
+                                                                table_item->table_id_,
+                                                                column_schema->get_column_id(),
+                                                                already_assigned))) {
+            } else if (!already_assigned) {
+              char req_name[OB_MAX_COLUMN_NAME_LENGTH];
+              if (is_ai_col) {
+                snprintf(req_name, sizeof(req_name), "__ai_request_%.*s",
+                         column_schema->get_column_name_str().length(), column_schema->get_column_name_str().ptr());
+              } else {
+                int32_t pfx_len = static_cast<int32_t>(strlen("__ai_state_"));
+                snprintf(req_name, sizeof(req_name), "__ai_request_%.*s",
+                         column_schema->get_column_name_str().length() - pfx_len,
+                         column_schema->get_column_name_str().ptr() + pfx_len);
+              }
+              const ObColumnSchemaV2 *req_col = table_schema->get_column_schema(req_name);
+              ObString norm_expr;
+              if (OB_NOT_NULL(req_col)) {
+                norm_expr = req_col->get_cur_default_value().get_string();
+              }
+              bool dep_changed = false;
+              for (int64_t a = 0; !dep_changed && a < assigns.at(i).assignments_.count(); ++a) {
+                const ObAssignment &as = assigns.at(i).assignments_.at(a);
+                if (OB_NOT_NULL(as.column_expr_)) {
+                  const ObColumnSchemaV2 *assigned_col = table_schema->get_column_schema(as.column_expr_->get_column_id());
+                  if (OB_NOT_NULL(assigned_col)) {
+                    if (assigned_col->is_rowkey_column()) {
+                      dep_changed = true;
+                    } else if (!assigned_col->is_hidden()) {
+                      if (norm_expr.empty() || check_column_in_ai_expr(assigned_col->get_column_name_str(), norm_expr)) {
+                        dep_changed = true;
+                      }
+                    }
+                  }
+                }
+              }
+              if (dep_changed) {
+                need_assigned = true;
+              }
+            }
+          }
+
+          if (OB_SUCC(ret) && need_assigned) {
+            // for insert scope, on duplicate key update column list already
+            // exists in insert list, therefore, only need to add assignment.
+            // add assign
+            ObAssignment assignment;
+            ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
+            if (OB_FAIL(add_column_to_stmt(*table_item, *column_schema, col_exprs))) {
+            } else if (col_exprs.empty()) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_ISNULL(col_item = stmt->get_column_item_by_id(
+                table_item->table_id_, col_exprs.at(0)->get_column_id()))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else {
+              assignment.column_expr_ = col_item->expr_;
+              assignment.is_implicit_ = true;
+              if (column_schema->is_on_update_current_timestamp()) {
+                assignment.column_expr_->set_result_flag(ON_UPDATE_NOW_FLAG);
+                ObDefaultValueUtils utils(stmt, &params_, this);
+                if (OB_FAIL(utils.build_now_expr(col_item, assignment.expr_))) {
+                }
+              } else if (column_schema->is_generated_column()) {
+                if (OB_FAIL(copy_schema_expr(*params_.expr_factory_,
+                                             col_item->expr_->get_dependant_expr(),
+                                             assignment.expr_))) {
+                }
+              } else if (is_ai_col) {
+                if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, assignment.expr_))) {
+                }
+              } else if (is_ai_state_col) {
+                ObConstRawExpr *const_expr = nullptr;
+                if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*params_.expr_factory_, ObIntType, 0, const_expr))) {
+                } else {
+                  assignment.expr_ = const_expr;
+                }
+              } else if (trigger_exist) {
+                assignment.expr_ = col_item->expr_;
+              }
             if (OB_FAIL(ret)) {
               //do nothing
             } else if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
@@ -597,6 +684,7 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
               }
             }
           }
+        }
         }
       }  // end for
     }

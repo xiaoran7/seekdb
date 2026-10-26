@@ -46,6 +46,7 @@
 #include "share/scn.h"//SCN
 #include "share/resource_limit_calculator/ob_resource_limit_calculator.h"//ObUserResourceCalculateArg
 #include "ob_ddl_args.h"
+#include "share/ai_service/ob_ai_column_struct.h"
 #include "share/inner_table/ob_load_inner_table_schema.h"
 #include "share/ai_service/ob_ai_model_info.h"
 
@@ -1268,7 +1269,8 @@ public:
                K_(lock_session_id),
                K_(lock_session_create_ts),
                K_(lock_priority),
-               K_(data_version));
+               K_(data_version),
+               K_(ai_columns));
 private:
   int alloc_index_arg(const ObIndexArg::IndexActionType index_action_type, ObIndexArg *&index_arg);
 public:
@@ -1302,6 +1304,7 @@ public:
   int64_t lock_session_create_ts_;
   transaction::tablelock::ObTableLockPriority lock_priority_;
   uint64_t data_version_;
+  common::ObSArray<share::ObAiColumnDefinition> ai_columns_;
   int serialize_index_args(char *buf, const int64_t data_len, int64_t &pos) const;
   int deserialize_index_args(const char *buf, const int64_t data_len, int64_t &pos);
   int64_t get_index_args_serialize_size() const;
@@ -1948,6 +1951,9 @@ public:
   share::schema::ObErrorInfo error_info_;
   bool is_alter_view_;
   common::ObSArray<oceanbase::share::schema::ObDependencyInfo> dep_infos_;
+  // AI columns declared in this CREATE TABLE. The DDL service creates their
+  // hidden columns and writes __all_ai_column once the table has an id.
+  common::ObSArray<share::ObAiColumnDefinition> ai_columns_;
 };
 
 

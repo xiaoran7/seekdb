@@ -40,8 +40,7 @@
 #include "../../../src/sql/parser/sql_parser_mysql_mode_lex.h"
 #include "../../../src/sql/parser/sql_parser_base.h"
 
-#define GEN_EXPLAN_STMT(no_use, explain_stmt, explain_type, display_type, stmt, into_table, set_statement_id) \
-  (void)(no_use); \
+#define GEN_EXPLAN_STMT(is_desc, explain_stmt, explain_type, display_type, stmt, into_table, set_statement_id) \
   ParseNode *type_node = NULL; \
   ParseNode *display_node = NULL; \
   if (0 != explain_type) { \
@@ -51,7 +50,10 @@
     malloc_terminal_node(display_node, result->malloc_pool_, display_type); \
   } \
   malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
-                           type_node, display_node, into_table, set_statement_id, stmt);
+                           type_node, display_node, into_table, set_statement_id, stmt); \
+  if (NULL != (explain_stmt) && NULL != (is_desc)) { \
+    (explain_stmt)->value_ = 1; \
+  }
 %}
 
 %destructor {destroy_tree($$);}<node>
@@ -333,7 +335,7 @@ END_P SET_VAR DELIMITER
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETRY RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -511,6 +513,8 @@ END_P SET_VAR DELIMITER
 %type <node> column_list_with_boost with_param_column_ref
 %type <node> es_sql_opt
 %type <node> hybrid_search_expr hybrid_search_param
+%type <node> file_table_expr file_table_arg_list file_table_arg copy_stmt opt_copy_format
+%type <node> opt_ai_column_with ai_column_with_list ai_column_with_item
 %type <node> vector_similarity_expr vector_similarity_metric
 %type <node> algorithm_opt lock_opt
 %type <node> flush_privileges_stmt opt_flush_privileges_scope
@@ -569,6 +573,7 @@ stmt:
     }
   }
   | create_table_like_stmt  { $$ = $1; check_question_mark($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | fork_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | fork_database_stmt      { $$ = $1; check_question_mark($$, result); }
   | diff_table_stmt         { $$ = $1; check_question_mark($$, result); }
@@ -4390,6 +4395,61 @@ create_with_opt_hint special_table_type TABLE opt_if_not_exists relation_factor 
 }
 ;
 
+copy_stmt:
+COPY '(' select_stmt ')' TO STRING_VALUE opt_copy_format
+{
+  // COPY is the export counterpart of read_csv: it resolves to the same
+  // statement shape as `SELECT ... INTO OUTFILE ... FORMAT (...)`, so the
+  // existing outfile writer handles the file.
+  ParseNode *into_node = NULL;
+  ParseNode *format_node = NULL;
+  if (OB_ISNULL($3)) {
+    yyerror(&@1, result, "invalid COPY source\n");
+    YYABORT_NO_MEMORY;
+  } else if (NULL != $7) {
+    malloc_non_terminal_node(format_node, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT, 1, $7);
+    if (OB_ISNULL(format_node)) {
+      yyerror(&@7, result, "No more space for malloc\n");
+      YYABORT_NO_MEMORY;
+    } else {
+      malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
+                               $6, format_node, NULL);
+    }
+  } else {
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
+                             $6, NULL, NULL);
+  }
+  if (OB_ISNULL(into_node)) {
+    yyerror(&@1, result, "No more space for malloc\n");
+    YYABORT_NO_MEMORY;
+  } else {
+    $$ = $3;
+    if (T_SELECT == $$->type_) {
+      $$->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
+      // Mark the node so the resolver can apply the COPY-only checks (the
+      // file export switch) without affecting plain SELECT ... INTO OUTFILE.
+      into_node->value_ = 1;
+    } else {
+      yyerror(&@1, result, "COPY source must be a SELECT\n");
+      YYERROR;
+    }
+  }
+}
+;
+
+opt_copy_format:
+/*EMPTY*/
+{
+  $$ = NULL;
+}
+| '(' external_file_format_list ')'
+{
+  ParseNode *format_list = NULL;
+  merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, $2);
+  $$ = format_list;
+}
+;
+
 /*****************************************************************************
  *
  *	FORK TABLE grammar
@@ -6238,6 +6298,38 @@ not NULLX
 | INVISIBLE
 {
   malloc_terminal_node($$, result->malloc_pool_, T_INVISIBLE);
+}| AI COLUMN '(' simple_expr ')' opt_ai_column_with
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_ATTRIBUTE, 3, $4, $6, NULL);
+}
+;
+
+opt_ai_column_with:
+/*EMPTY*/
+{
+  $$ = NULL;
+}
+| WITH '(' ai_column_with_list ')'
+{
+  $$ = $3;
+}
+;
+
+ai_column_with_list:
+ai_column_with_item
+{
+  $$ = $1;
+}
+| ai_column_with_list ',' ai_column_with_item
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+ai_column_with_item:
+NAME_OB COMP_EQ simple_expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $3);
 }
 ;
 
@@ -10848,6 +10940,55 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
+;
+
+file_table_expr:
+NAME_OB '(' file_table_arg_list ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 4, $1, $3, NULL, NULL);
+}
+| NAME_OB '(' file_table_arg_list ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 4, $1, $3, $5, NULL);
+}
+| NAME_OB '(' file_table_arg_list ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 4, $1, $3, $6, NULL);
+}
+| NAME_OB '(' file_table_arg_list ')' relation_name '(' relation_name_list ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 4, $1, $3, $5, $7);
+}
+| NAME_OB '(' file_table_arg_list ')' AS relation_name '(' relation_name_list ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 4, $1, $3, $6, $8);
+}
+;
+
+file_table_arg_list:
+file_table_arg
+{
+  $$ = $1;
+}
+| file_table_arg_list ',' file_table_arg
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_table_arg:
+simple_expr
+{
+  $$ = $1;
+}
+| NAME_OB COMP_EQ simple_expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $3);
+}
 ;
 
 tbl_name:
@@ -12306,8 +12447,20 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  if ($$) {
+    $$->value_ = 1;
+  }
+}
+| DESC
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  if ($$) {
+    $$->value_ = 1;
+  }
+}
 ;
 
 explainable_stmt:
@@ -14692,7 +14845,15 @@ alter_table_action
 ;
 
 alter_table_action:
-opt_set table_option_list_space_seperated
+RETRY AI COLUMN relation_name opt_where
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_RETRY_AI_COLUMN, 2, $4, $5);
+  if (NULL != $5) {
+    check_ret(setup_token_pos_info_and_dup_string($5, result, @5.first_column, @5.last_column),
+              &@5, result);
+  }
+}
+| opt_set table_option_list_space_seperated
 {
   (void)$1;
   merge_nodes($$, result, T_TABLE_OPTION_LIST, $2);
@@ -17959,6 +18120,7 @@ ACCOUNT
 |       RESTART
 |       RESTORE
 |       RESUME
+|       RETRY
 |       RETURNED_SQLSTATE
 |       RETURNING
 |       RETURNS

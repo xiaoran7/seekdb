@@ -194,6 +194,7 @@ private:
 
   int refresh_schema_for_table();
   int populate_based_schema_obj_info_(obcall::ObAlterTableArg &alter_table_arg);
+  int execute_retry_ai_column(ObExecContext &ctx, ObAlterTableStmt &stmt);
 
 private:
   //DISALLOW_COPY_AND_ASSIGN(ObAlterTableExecutor);

@@ -739,6 +739,99 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           }
           if (OB_SUCC(ret)){
             stat.column_id_ = column.get_column_id();
+            if (OB_FAIL(ret)) {
+            } else if (stat.is_ai_column_) {
+              share::ObAiColumnDefinition ai_column;
+              ai_column.column_name_ = column.get_column_name_str();
+              ai_column.column_id_ = column.get_column_id();
+              ai_column.max_retries_ = stat.ai_max_retries_;
+              ai_column.sync_mode_ = stat.ai_sync_mode_;
+              ai_column.normalized_expr_ = stat.ai_normalized_expr_;
+
+              // Hidden state column: __ai_state_<col>
+              char state_col_name[OB_MAX_COLUMN_NAME_LENGTH];
+              snprintf(state_col_name, sizeof(state_col_name), "__ai_state_%.*s",
+                       column.get_column_name_str().length(), column.get_column_name_str().ptr());
+              ObColumnSchemaV2 state_col;
+              state_col.reset();
+              uint64_t state_col_id = gen_column_id();
+              ai_column.state_column_id_ = state_col_id;
+              state_col.set_column_id(state_col_id);
+              state_col.set_data_type(ObIntType);
+              state_col.set_is_hidden(true);
+              state_col.set_nullable(false);
+              state_col.set_charset_type(CHARSET_BINARY);
+              state_col.set_collation_type(CS_TYPE_BINARY);
+              state_col.set_prev_column_id(UINT64_MAX);
+              state_col.set_next_column_id(UINT64_MAX);
+              ObObj state_default;
+              state_default.set_int(share::AI_COLUMN_TASK_PENDING);
+              state_col.set_cur_default_value(state_default, false);
+              state_col.set_orig_default_value(state_default);
+              if (OB_FAIL(state_col.set_column_name(state_col_name))) {
+              } else if (OB_FAIL(table_schema.add_column(state_col))) {
+              } else {
+                ObColumnNameHashWrapper name_key(state_col.get_column_name_str());
+                column_name_set_.set_refactored(name_key);
+              }
+
+              // Hidden request column: __ai_request_<col>
+              char req_col_name[OB_MAX_COLUMN_NAME_LENGTH];
+              snprintf(req_col_name, sizeof(req_col_name), "__ai_request_%.*s",
+                       column.get_column_name_str().length(), column.get_column_name_str().ptr());
+              ObColumnSchemaV2 req_col;
+              req_col.reset();
+              uint64_t req_col_id = gen_column_id();
+              ai_column.request_column_id_ = req_col_id;
+              req_col.set_column_id(req_col_id);
+              req_col.set_data_type(ObLongTextType);
+              req_col.set_is_hidden(true);
+              req_col.set_nullable(true);
+              req_col.set_charset_type(CHARSET_UTF8MB4);
+              req_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+              req_col.set_prev_column_id(UINT64_MAX);
+              req_col.set_next_column_id(UINT64_MAX);
+              ObObj req_default;
+              req_default.set_varchar(stat.ai_normalized_expr_);
+              req_col.set_cur_default_value(req_default, false);
+              req_col.set_orig_default_value(req_default);
+              if (OB_FAIL(ret)) {
+              } else if (OB_FAIL(req_col.set_column_name(req_col_name))) {
+              } else if (OB_FAIL(table_schema.add_column(req_col))) {
+              } else {
+                ObColumnNameHashWrapper name_key(req_col.get_column_name_str());
+                column_name_set_.set_refactored(name_key);
+              }
+
+              // Hidden result spec column: __ai_result_spec_<col>
+              char spec_col_name[OB_MAX_COLUMN_NAME_LENGTH];
+              snprintf(spec_col_name, sizeof(spec_col_name), "__ai_result_spec_%.*s",
+                       column.get_column_name_str().length(), column.get_column_name_str().ptr());
+              ObColumnSchemaV2 spec_col;
+              spec_col.reset();
+              uint64_t spec_col_id = gen_column_id();
+              ai_column.result_spec_column_id_ = spec_col_id;
+              spec_col.set_column_id(spec_col_id);
+              spec_col.set_data_type(ObLongTextType);
+              spec_col.set_is_hidden(true);
+              spec_col.set_nullable(true);
+              spec_col.set_charset_type(CHARSET_UTF8MB4);
+              spec_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+              spec_col.set_prev_column_id(UINT64_MAX);
+              spec_col.set_next_column_id(UINT64_MAX);
+              if (OB_FAIL(ret)) {
+              } else if (OB_FAIL(spec_col.set_column_name(spec_col_name))) {
+              } else if (OB_FAIL(table_schema.add_column(spec_col))) {
+              } else {
+                ObColumnNameHashWrapper name_key(spec_col.get_column_name_str());
+                column_name_set_.set_refactored(name_key);
+              }
+
+              if (OB_FAIL(ret)) {
+              } else if (OB_FAIL(create_table_stmt->get_create_table_arg().ai_columns_.push_back(
+                      ai_column))) {
+              }
+            }
             if (stat.is_primary_key_) {
               if (is_organization_set_to_heap()) {
                 primary_key_set_in_heap_table = true;

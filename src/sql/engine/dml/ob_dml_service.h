@@ -108,6 +108,9 @@ public:
                                 ObUpdRtDef &upd_rtdef,
                                 bool &is_skipped,
                                 ObTableModifyOp &dml_op);
+  static int handle_ai_column_insert(const ObInsCtDef &ins_ctdef, ObTableModifyOp &dml_op);
+  static int handle_ai_column_delete(const ObDelCtDef &del_ctdef, ObTableModifyOp &dml_op);
+  static int handle_ai_column_update(const ObUpdCtDef &upd_ctdef, ObUpdRtDef &upd_rtdef, ObTableModifyOp &dml_op);
   static int insert_row(const ObInsCtDef &ins_ctdef,
                         ObInsRtDef &ins_rtdef,
                         const ObDASTabletLoc *tablet_loc,

@@ -33,6 +33,9 @@
 #include "sql/resolver/ddl/ob_rename_table_stmt.h"
 #include "sql/resolver/ddl/ob_truncate_table_stmt.h"
 #include "sql/resolver/ddl/ob_create_table_like_stmt.h"
+#include "share/ai_service/ob_ai_column_struct.h"
+#include "share/ai_service/ob_ai_column_proxy.h"
+#include "share/ob_dml_sql_splicer.h"
 #include "sql/resolver/ddl/ob_fork_table_stmt.h"
 #include "sql/resolver/ddl/ob_recyclebin_restore_stmt.h"
 #include "sql/resolver/ddl/ob_purge_stmt.h"
@@ -762,6 +765,8 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.is_retry_ai_column()) {
+    ret = execute_retry_ai_column(ctx, stmt);
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;
@@ -1424,6 +1429,239 @@ int ObAlterTableExecutor::set_index_arg_list(ObExecContext &ctx, ObAlterTableStm
         create_index_arg.is_inner_ = my_session->is_inner();
         if (OB_FAIL(create_index_arg.assign(index_stmt.get_create_index_arg()))) {
         } else if (OB_FAIL(alter_table_arg.index_arg_list_.push_back(&create_index_arg))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTableStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *my_session = ctx.get_my_session();
+  if (OB_ISNULL(my_session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ObString db_name = stmt.get_database_name();
+    if (db_name.empty()) {
+      db_name = stmt.get_org_database_name();
+    }
+    if (db_name.empty()) {
+      db_name = my_session->get_database_name();
+    }
+    ObString tbl_name = stmt.get_table_name();
+    if (tbl_name.empty()) {
+      tbl_name = stmt.get_org_table_name();
+    }
+    const ObString &col_name = stmt.get_retry_ai_col_name();
+    const ObString &where_pred = stmt.get_retry_where_pred();
+
+    char state_col_name[OB_MAX_COLUMN_NAME_LENGTH];
+    snprintf(state_col_name, sizeof(state_col_name), "__ai_state_%.*s",
+             col_name.length(), col_name.ptr());
+
+    ObArenaAllocator alloc(ObModIds::OB_SQL_EXECUTOR);
+    char *rewritten_where = nullptr;
+    int64_t rw_len = where_pred.length() * 4 + 256;
+    int64_t rw_pos = 0;
+    if (OB_ISNULL(rewritten_where = static_cast<char *>(alloc.alloc(rw_len)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (!where_pred.empty()) {
+      const char *p = where_pred.ptr();
+      const int32_t len = where_pred.length();
+      int32_t i = 0;
+      while (i < len && isspace(p[i])) ++i;
+      if (i + 5 <= len && 0 == strncasecmp(p + i, "where", 5) && (i + 5 == len || isspace(p[i + 5]))) {
+        i += 5;
+        while (i < len && isspace(p[i])) ++i;
+      }
+      while (i < len && OB_SUCC(ret)) {
+        if (p[i] == '`') {
+          rewritten_where[rw_pos++] = p[i++];
+          while (i < len && p[i] != '`') {
+            rewritten_where[rw_pos++] = p[i++];
+          }
+          if (i < len) {
+            rewritten_where[rw_pos++] = p[i++];
+          }
+        } else if (p[i] == '\'') {
+          rewritten_where[rw_pos++] = p[i++];
+          while (i < len && p[i] != '\'') {
+            if (p[i] == '\\' && i + 1 < len) {
+              rewritten_where[rw_pos++] = p[i++];
+            }
+            rewritten_where[rw_pos++] = p[i++];
+          }
+          if (i < len) {
+            rewritten_where[rw_pos++] = p[i++];
+          }
+        } else if ((i == 0 || (!isalnum(p[i - 1]) && p[i - 1] != '_')) &&
+                   i + 6 <= len && 0 == strncasecmp(p + i, "status", 6) &&
+                   (i + 6 == len || (!isalnum(p[i + 6]) && p[i + 6] != '_'))) {
+          int written = snprintf(rewritten_where + rw_pos, rw_len - rw_pos,
+                   "(CASE `%.*s` WHEN 0 THEN 'PENDING' WHEN 1 THEN 'RUNNING' WHEN 2 THEN 'READY' WHEN 3 THEN 'FAILED' END)",
+                   static_cast<int>(strlen(state_col_name)), state_col_name);
+          rw_pos += written;
+          i += 6;
+        } else {
+          rewritten_where[rw_pos++] = p[i++];
+        }
+      }
+      rewritten_where[rw_pos] = '\0';
+    }
+
+    ObMySQLProxy *sql_proxy = GCTX.sql_proxy_;
+    if (OB_ISNULL(sql_proxy)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      share::schema::ObSchemaGetterGuard schema_guard;
+      const ObTableSchema *table_schema = nullptr;
+      if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(schema_guard))) {
+      } else if (OB_FAIL(schema_guard.get_table_schema(db_name, tbl_name, false, table_schema))) {
+      } else if (OB_ISNULL(table_schema)) {
+        ret = OB_TABLE_NOT_EXIST;
+      } else {
+        const uint64_t table_id = table_schema->get_table_id();
+        const ObColumnSchemaV2 *col_schema = table_schema->get_column_schema(col_name);
+        if (OB_ISNULL(col_schema)) {
+          ret = OB_ERR_BAD_FIELD_ERROR;
+        } else {
+          const uint64_t column_id = col_schema->get_column_id();
+          share::ObAiColumnSchema ai_meta;
+          if (OB_FAIL(share::ObAiColumnProxy::load_ai_column(*sql_proxy, alloc, table_id, column_id, ai_meta))) {
+            LOG_WARN("failed to load ai column meta", K(ret), K(table_id), K(column_id));
+          } else {
+            ObString pk_col_name;
+            for (int64_t i = 0; i < table_schema->get_column_count(); ++i) {
+              const ObColumnSchemaV2 *c = table_schema->get_column_schema_by_idx(i);
+              if (OB_NOT_NULL(c) && c->is_rowkey_column()) {
+                pk_col_name = c->get_column_name_str();
+                break;
+              }
+            }
+            if (pk_col_name.empty()) {
+              pk_col_name = ObString::make_string("id");
+            }
+
+            ObString expr_arg;
+            const char *norm_ptr = ai_meta.normalized_expr_.ptr();
+            int32_t norm_len = ai_meta.normalized_expr_.length();
+            const char *comma = strchr(norm_ptr, ',');
+            if (NULL != comma && comma + 1 < norm_ptr + norm_len) {
+              const char *arg_start = comma + 1;
+              while (arg_start < norm_ptr + norm_len && isspace(*arg_start)) arg_start++;
+              const char *arg_end = norm_ptr + norm_len - 1;
+              const char *comment_pos = strstr(arg_start, "/*");
+              if (NULL != comment_pos) {
+                arg_end = comment_pos - 1;
+              }
+              while (arg_end > arg_start && (*arg_end == ')' || isspace(*arg_end))) arg_end--;
+              if (arg_end >= arg_start) {
+                expr_arg.assign_ptr(arg_start, static_cast<int32_t>(arg_end - arg_start + 1));
+              }
+            }
+            if (expr_arg.empty()) {
+              expr_arg = ObString::make_string("content");
+            }
+
+            ObSqlString select_sql;
+            if (rw_pos > 0) {
+              OZ(select_sql.assign_fmt("SELECT `%.*s`, %.*s FROM `%.*s`.`%.*s` WHERE %.*s",
+                                       pk_col_name.length(), pk_col_name.ptr(),
+                                       expr_arg.length(), expr_arg.ptr(),
+                                       db_name.length(), db_name.ptr(),
+                                       tbl_name.length(), tbl_name.ptr(),
+                                       static_cast<int32_t>(rw_pos), rewritten_where));
+            } else {
+              OZ(select_sql.assign_fmt("SELECT `%.*s`, %.*s FROM `%.*s`.`%.*s`",
+                                       pk_col_name.length(), pk_col_name.ptr(),
+                                       expr_arg.length(), expr_arg.ptr(),
+                                       db_name.length(), db_name.ptr(),
+                                       tbl_name.length(), tbl_name.ptr()));
+            }
+
+            ObSqlString update_sql;
+            if (rw_pos > 0) {
+              OZ(update_sql.assign_fmt("UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%.*s` = 0 WHERE %.*s",
+                                       db_name.length(), db_name.ptr(),
+                                       tbl_name.length(), tbl_name.ptr(),
+                                       col_name.length(), col_name.ptr(),
+                                       static_cast<int32_t>(strlen(state_col_name)), state_col_name,
+                                       static_cast<int32_t>(rw_pos), rewritten_where));
+            } else {
+              OZ(update_sql.assign_fmt("UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%.*s` = 0",
+                                       db_name.length(), db_name.ptr(),
+                                       tbl_name.length(), tbl_name.ptr(),
+                                       col_name.length(), col_name.ptr(),
+                                       static_cast<int32_t>(strlen(state_col_name)), state_col_name));
+            }
+
+            if (OB_SUCC(ret)) {
+              struct TaskInfo {
+                int64_t pk_val_;
+                ObString req_str_;
+              };
+              ObSEArray<TaskInfo, 16> tasks_to_create;
+              SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+                common::sqlclient::ObMySQLResult *q_res = nullptr;
+                if (OB_FAIL(sql_proxy->read(res, select_sql.ptr()))) {
+                  LOG_WARN("failed to select matching rows for retry", K(ret), K(select_sql));
+                } else if (OB_ISNULL(q_res = res.get_result())) {
+                  ret = OB_ERR_UNEXPECTED;
+                } else {
+                  while (OB_SUCC(ret) && OB_SUCC(q_res->next())) {
+                    int64_t pk_val = 0;
+                    ObString req_val;
+                    EXTRACT_INT_FIELD_MYSQL(*q_res, pk_col_name.ptr(), pk_val, int64_t);
+                    EXTRACT_VARCHAR_FIELD_MYSQL(*q_res, expr_arg.ptr(), req_val);
+                    TaskInfo info;
+                    info.pk_val_ = pk_val;
+                    OZ(ob_write_string(alloc, req_val, info.req_str_));
+                    OZ(tasks_to_create.push_back(info));
+                  }
+                  if (OB_ITER_END == ret) {
+                    ret = OB_SUCCESS;
+                  }
+                }
+              }
+
+              int64_t affected_rows = 0;
+              if (OB_SUCC(ret)) {
+                if (OB_FAIL(sql_proxy->write(update_sql.ptr(), affected_rows))) {
+                  LOG_WARN("failed to update rows for retry", K(ret), K(update_sql));
+                }
+              }
+
+              if (OB_SUCC(ret) && tasks_to_create.count() > 0) {
+                uint64_t req_group_id = ObTimeUtility::current_time();
+                for (int64_t t = 0; OB_SUCC(ret) && t < tasks_to_create.count(); ++t) {
+                  const TaskInfo &tinfo = tasks_to_create.at(t);
+                  uint64_t rowkey_hash = tinfo.pk_val_;
+                  char pred_buf[64];
+                  snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
+                           pk_col_name.length(), pk_col_name.ptr(), tinfo.pk_val_);
+
+                  ObSqlString del_task_sql;
+                  OZ(del_task_sql.assign_fmt(
+                      "DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu",
+                      table_id, column_id, rowkey_hash));
+                  int64_t del_rows = 0;
+                  OZ(sql_proxy->write(del_task_sql.ptr(), del_rows));
+
+                  ObSqlString ins_task_sql;
+                  OZ(ins_task_sql.assign_fmt(
+                      "INSERT INTO oceanbase.__all_ai_column_task "
+                      "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
+                      "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '%.*s', 0, '')",
+                      table_id, column_id, rowkey_hash, req_group_id, tinfo.pk_val_, pred_buf,
+                      tinfo.req_str_.length(), tinfo.req_str_.ptr()));
+                  int64_t ins_rows = 0;
+                  OZ(sql_proxy->write(ins_task_sql.ptr(), ins_rows));
+                }
+              }
+            }
+          }
         }
       }
     }
