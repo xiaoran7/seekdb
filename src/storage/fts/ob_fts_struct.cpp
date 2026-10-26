@@ -43,7 +43,11 @@ bool ObFTWord::operator==(const ObFTWord &other) const
   bool is_equal = false;
   int ret = OB_SUCCESS;
   int cmp_ret = 0;
-  if (meta_ == other.meta_ && word_.len_ == other.word_.len_
+  // Raw byte comparison is only equivalent to the collation-aware compare for binary collations.
+  const bool binary_cmp = meta_ == other.meta_
+                          && (CS_TYPE_UTF8MB4_BIN == meta_.get_collation_type()
+                              || CS_TYPE_BINARY == meta_.get_collation_type());
+  if (binary_cmp && word_.len_ == other.word_.len_
       && (word_.ptr_ == other.word_.ptr_ || 0 == MEMCMP(word_.ptr_, other.word_.ptr_, word_.len_))) {
     is_equal = true;
   } else {

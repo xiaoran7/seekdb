@@ -125,7 +125,7 @@ private:
   int groupby_word(const ObFTWord &word, const int64_t word_cnt);
 private:
   ObObjMeta word_meta_;
-  const common::ObCharsetInfo *cs_;
+  const ObCharsetInfo *cs_;
   common::ObIAllocator &allocator_;
   ObFTWordMap &word_map_;
   int64_t min_max_word_cnt_;

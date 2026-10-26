@@ -196,13 +196,14 @@ ObDocIdExt::ObDocIdExt(const ObDocIdExt &other)
   : buf_{}, datum_(other.datum_)
 {
   if (!other.datum_.is_null() && other.datum_.len_ > 0) {
-    MEMCPY(buf_, other.buf_, other.datum_.len_);
+    MEMCPY(buf_, other.datum_.ptr_, other.datum_.len_);
   }
   datum_.ptr_ = buf_;
 }
 
 void ObDocIdExt::reset()
 {
+  MEMSET(buf_, 0, OB_DOC_ID_EXT_SIZE);
   datum_ = ObDatum(buf_, 0, false);
 }
 
@@ -225,7 +226,9 @@ const ObDatum &ObDocIdExt::get_datum() const
 int ObDocIdExt::from_obj(const ObObj &obj)
 {
   int ret = common::OB_SUCCESS;
-  if (OB_FAIL(datum_.from_obj(obj))) {
+  ObDatum tmp;
+  if (OB_FAIL(tmp.from_obj(obj))) {
+  } else if (OB_FAIL(from_datum(tmp))) {
   }
   return ret;
 }
@@ -251,11 +254,11 @@ int ObDocIdExt::from_datum(const ObDatum &datum)
 ObDocIdExt &ObDocIdExt::operator=(const ObDocIdExt &other)
 {
   if (this != &other) {
+    datum_ = other.datum_;
     if (!other.datum_.is_null() && other.datum_.len_ > 0) {
-      MEMCPY(buf_, other.buf_, other.datum_.len_);
+      MEMCPY(buf_, other.datum_.ptr_, other.datum_.len_);
     }
     datum_.ptr_ = buf_;
-    datum_.pack_ = other.datum_.pack_;
   }
   return *this;
 }
