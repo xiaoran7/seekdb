@@ -96,12 +96,20 @@ int ObSpaceFTParser::get_next_token(const char *&word,
     const ObCharsetInfo *cs = cs_;
     do {
       while (next < end) {
-        int ctype;
-        mbl = cs->cset->ctype(cs, &ctype, (uchar *)next, (uchar *)end);
-        if (true_word_char(ctype, *next)) {
-          break;
+        const uint8_t ch = static_cast<uint8_t>(*next);
+        if (OB_LIKELY(ch < 0x80)) {
+          if (G_ASCII_WORD_TABLE.is_word(ch)) {
+            break;
+          }
+          ++next;
+        } else {
+          int ctype;
+          mbl = cs->cset->ctype(cs, &ctype, (uchar *)next, (uchar *)end);
+          if (true_word_char(ctype, *next)) {
+            break;
+          }
+          next += mbl > 0 ? mbl : (mbl < 0 ? -mbl : 1);
         }
-        next += mbl > 0 ? mbl : (mbl < 0 ? -mbl : 1);
       }
       if (next >= end) {
         ret = OB_ITER_END;
@@ -109,13 +117,22 @@ int ObSpaceFTParser::get_next_token(const char *&word,
         int64_t c_nums = 0;
         start = next;
         while (next < end) {
-          int ctype;
-          mbl = cs->cset->ctype(cs, &ctype, (uchar *)next, (uchar *)end);
-          if (!true_word_char(ctype, *next)) {
-            break;
+          const uint8_t ch = static_cast<uint8_t>(*next);
+          if (OB_LIKELY(ch < 0x80)) {
+            if (!G_ASCII_WORD_TABLE.is_word(ch)) {
+              break;
+            }
+            ++c_nums;
+            ++next;
+          } else {
+            int ctype;
+            mbl = cs->cset->ctype(cs, &ctype, (uchar *)next, (uchar *)end);
+            if (!true_word_char(ctype, *next)) {
+              break;
+            }
+            ++c_nums;
+            next += mbl > 0 ? mbl : (mbl < 0 ? -mbl : 1);
           }
-          ++c_nums;
-          next += mbl > 0 ? mbl : (mbl < 0 ? -mbl : 1);
         }
         if (0 < c_nums) {
           word = start;

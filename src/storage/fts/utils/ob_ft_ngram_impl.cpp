@@ -103,26 +103,39 @@ int ObFTNgramImpl::get_next_token(const char *&word,
             window_.meet_delimiter_ = true;
             window_.is_last_batch_ = true;
           } else {
-            const int64_t c_len = ob_mbcharlen_ptr(cs_, cur_, fulltext_end_);
-            if (cur_ + c_len > fulltext_end_ || 0 == c_len) {
-              // if invalid char, end it
-              window_.meet_delimiter_ = true;
-              window_.is_last_batch_ = true;
-            } else {
-              int type = 0;
-              cs_->cset->ctype(cs_, &type, (uchar *)cur_, (uchar *)fulltext_end_);
-              bool delimiter = !true_word_char(type, *cur_);
-              if (delimiter) {
+            const uint8_t ch = static_cast<uint8_t>(*cur_);
+            if (OB_LIKELY(ch < 0x80)) {
+              if (!G_ASCII_WORD_TABLE.is_word(ch)) {
                 window_.meet_delimiter_ = true;
               } else {
                 Word word;
-                word.len = c_len;
+                word.len = 1;
                 word.ptr = cur_;
                 window_.add_word(word);
               }
+              cur_ += 1;
+            } else {
+              const int64_t c_len = ob_mbcharlen_ptr(cs_, cur_, fulltext_end_);
+              if (cur_ + c_len > fulltext_end_ || 0 == c_len) {
+                // if invalid char, end it
+                window_.meet_delimiter_ = true;
+                window_.is_last_batch_ = true;
+              } else {
+                int type = 0;
+                cs_->cset->ctype(cs_, &type, (uchar *)cur_, (uchar *)fulltext_end_);
+                bool delimiter = !true_word_char(type, *cur_);
+                if (delimiter) {
+                  window_.meet_delimiter_ = true;
+                } else {
+                  Word word;
+                  word.len = c_len;
+                  word.ptr = cur_;
+                  window_.add_word(word);
+                }
+              }
+              // anyway step next.
+              cur_ += c_len;
             }
-            // anyway step next.
-            cur_ += c_len;
           }
         } else {
           window_.out_ngram(word, word_len, char_cnt, word_freq);
