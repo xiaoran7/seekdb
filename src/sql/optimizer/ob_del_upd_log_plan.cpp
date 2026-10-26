@@ -1020,6 +1020,10 @@ int ObDelUpdLogPlan::get_ddl_sample_sort_column_count(int64_t &sample_sort_colum
     } else if (OB_FAIL(schema_guard->get_table_schema( table_item->ddl_table_id_, table_schema))) {
     } else if (OB_ISNULL(table_schema)) {
       ret = OB_TABLE_NOT_EXIST;
+    } else if (table_schema->is_fts_doc_word_aux()) {
+      // Repartition FTS doc-word rows by doc_id ranges while preserving the
+      // complete sort key for the final local sort performed by each worker.
+      sample_sort_column_count = 1;
     } else if (table_schema->is_unique_index()) {
       sample_sort_column_count = table_schema->get_index_column_num();
     }

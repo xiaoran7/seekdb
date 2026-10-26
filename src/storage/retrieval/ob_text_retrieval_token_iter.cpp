@@ -96,7 +96,8 @@ void ObTextRetrievalTokenIter::reset()
 
 void ObTextRetrievalTokenIter::reuse()
 {
-  if (inv_idx_agg_cache_mode_ && !inv_idx_agg_param_->need_switch_param_) {
+  if (inv_idx_agg_cache_mode_ && OB_NOT_NULL(inv_idx_agg_param_)
+      && !inv_idx_agg_param_->need_switch_param_) {
     // do nothing
   } else {
     token_doc_cnt_calculated_ = false;
@@ -203,7 +204,8 @@ int ObTextRetrievalTokenIter::get_next_row()
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
-  } else if (!token_doc_cnt_calculated_ && OB_FAIL(estimate_token_doc_cnt())) {
+  } else if (need_calc_relevance() && !token_doc_cnt_calculated_
+      && OB_FAIL(estimate_token_doc_cnt())) {
   } else if (OB_FAIL(query::das_scan_next_row(inv_idx_scan_iter_))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     }
@@ -242,7 +244,8 @@ int ObTextRetrievalTokenIter::get_next_batch(const int64_t capacity, int64_t &co
   count = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
-  } else if (!token_doc_cnt_calculated_ && OB_FAIL(estimate_token_doc_cnt())) {
+  } else if (need_calc_relevance() && !token_doc_cnt_calculated_
+      && OB_FAIL(estimate_token_doc_cnt())) {
   } else if (OB_FAIL(query::das_scan_next_rows(
                  inv_idx_scan_iter_, count, OB_MIN(max_batch_size_, capacity)))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
@@ -438,9 +441,14 @@ int ObTextRetrievalDaaTTokenIter::init(const ObTextRetrievalScanIterParam &iter_
       cmp_func_ = basic_funcs->null_first_cmp_;
       if (OB_ISNULL(cmp_func_)) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (FALSE_IT(relevance_.set_allocator(allocator_))) {
-      } else if (OB_FAIL(relevance_.init(max_batch_size_))) {
-      } else if (OB_FAIL(relevance_.prepare_allocate(max_batch_size_))) {
+      } else if (OB_NOT_NULL(relevance_expr_)
+          && FALSE_IT(relevance_.set_allocator(allocator_))) {
+      } else if (OB_NOT_NULL(relevance_expr_)
+          && OB_FAIL(relevance_.init(max_batch_size_))) {
+        LOG_WARN("failed to init next batch iter idxes array", K(ret));
+      } else if (OB_NOT_NULL(relevance_expr_)
+          && OB_FAIL(relevance_.prepare_allocate(max_batch_size_))) {
+        LOG_WARN("failed to prepare allocate next batch iter idxes array", K(ret));
       } else if (FALSE_IT(doc_id_.set_allocator(allocator_))) {
       } else if (OB_FAIL(doc_id_.init(max_batch_size_))) {
       } else if (OB_FAIL(doc_id_.prepare_allocate(max_batch_size_))) {
@@ -549,6 +557,40 @@ int ObTextRetrievalDaaTTokenIter::save_docids()
           };
         }
       }
+    }
+  }
+  return ret;
+}
+
+int ObTextRetrievalDaaTTokenIter::load_next_doc_id_batch()
+{
+  int ret = OB_SUCCESS;
+  count_ = 0;
+  cur_idx_ = 0;
+  if (OB_FAIL(token_iter_->get_next_batch(max_batch_size_, count_))) {
+    if (OB_ITER_END == ret && count_ > 0) {
+      ret = OB_SUCCESS;
+    } else if (OB_ITER_END != ret) {
+      LOG_WARN("failed to load inverted-index document batch", K(ret), K_(count));
+    }
+  }
+  if (OB_SUCC(ret) && count_ > 0 && OB_FAIL(save_union_docids())) {
+    LOG_WARN("failed to materialize union document ids", K(ret), K_(count));
+  } else if (OB_SUCC(ret) && 0 == count_) {
+    ret = OB_ITER_END;
+  }
+  return ret;
+}
+
+int ObTextRetrievalDaaTTokenIter::save_union_docids()
+{
+  int ret = OB_SUCCESS;
+  cur_idx_ = 0;
+  const ObDatumVector &doc_id_datum =
+      inv_scan_domain_id_col_->locate_expr_datumvector(*eval_ctx_);
+  for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
+    if (OB_FAIL(doc_id_[i].from_datum(*doc_id_datum.at(i)))) {
+      LOG_WARN("failed to copy union document id", K(ret), K(i));
     }
   }
   return ret;

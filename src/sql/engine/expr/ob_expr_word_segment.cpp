@@ -87,7 +87,7 @@ int ObExprWordSegment::cg_expr(
   } else {
     ObEvalCtx::TempAllocGuard alloc_guard(eval_ctx);
     int64_t res_str_len = 0;
-    ObSEArray<ObString, 1> ft_parts;
+    ObSEArray<ObString, 4> ft_parts;
     const int64_t mb_max_len = cs->mbmaxlen;
     char mb_separator[mb_max_len];
     int32_t length_of_separator = 0;
@@ -114,7 +114,10 @@ int ObExprWordSegment::cg_expr(
     if (OB_FAIL(ret)) {
     } else if (0 == ft_parts.count()) {
       expr_datum.set_null();
-    } else if (OB_FAIL(ObCharset::wc_mb(raw_ctx.args_[0]->obj_meta_.get_collation_type(), wide_char, mb_separator,
+    } else if (1 == ft_parts.count()) {
+      expr_datum.set_string(ft_parts.at(0));
+    } else if (ft_parts.count() > 1
+        && OB_FAIL(ObCharset::wc_mb(raw_ctx.args_[0]->obj_meta_.get_collation_type(), wide_char, mb_separator,
               mb_max_len, length_of_separator))) {
     } else {
       res_str_len = res_str_len + length_of_separator * (ft_parts.count() - 1);

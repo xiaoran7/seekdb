@@ -43,6 +43,9 @@ int ObFTDictHub::init()
 int ObFTDictHub::destroy()
 {
   int ret = OB_SUCCESS;
+  dict_map_.destroy();
+  rw_dict_lock_.destroy();
+  ATOMIC_STORE(&generation_epoch_, 0);
   is_inited_ = false;
   return ret;
 }
@@ -76,6 +79,8 @@ int ObFTDictHub::build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &
         if (OB_FAIL(ObFTRangeDict::build_cache_from_ik_dict(desc, container))) {
         } else if (FALSE_IT(info.range_count_ = container.get_handles().size())) {
         } else if (OB_FAIL(put_dict_info(key, info))) {
+        } else {
+          ATOMIC_INC(&generation_epoch_);
         }
       }
     }

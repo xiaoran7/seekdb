@@ -468,6 +468,10 @@ int ObDASLegacyTRMergeIter::create_sparse_retrieval_iter()
 int ObDASLegacyTRMergeIter::init_daat_iter_param(ObTextDaaTParam &iter_param)
 {
   int ret = OB_SUCCESS;
+  const bool need_relevance = sr_iter_param_.need_calc_relevance();
+  sr_iter_param_.need_collect_dims_ = need_relevance
+      || sql::ObMatchAgainstMode::BOOLEAN_MODE == ir_ctdef_->mode_flag_
+      || ir_rtdef_->minimum_should_match_ > 1;
   iter_param.dim_iters_ = &dim_iters_;
   iter_param.base_param_ = &sr_iter_param_;
   iter_param.allocator_ = &myself_allocator_;
