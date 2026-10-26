@@ -47,6 +47,17 @@ public:
     SURROGATE_LOW = 6,
   };
 
+  struct ObAsciiCharTypeTable {
+    CharType table[128];
+    constexpr ObAsciiCharTypeTable() : table{} {
+      for (int i = 0; i < 128; ++i) table[i] = CharType::USELESS;
+      for (int i = 'a'; i <= 'z'; ++i) table[i] = CharType::ENGLISH_LETTER;
+      for (int i = 'A'; i <= 'Z'; ++i) table[i] = CharType::ENGLISH_LETTER;
+      for (int i = '0'; i <= '9'; ++i) table[i] = CharType::ARABIC_LETTER;
+    }
+    constexpr CharType get(const uint8_t c) const { return table[c]; }
+  };
+
   static int classify_first_char(ObCollationType coll_type,
                                  const char *input,
                                  const uint8_t char_len,
@@ -66,13 +77,8 @@ public:
       const uint8_t b0 = u[0];
       if (OB_LIKELY(b0 < 0x80)) {
         char_len = 1;
-        if ((b0 >= 'a' && b0 <= 'z') || (b0 >= 'A' && b0 <= 'Z')) {
-          type = CharType::ENGLISH_LETTER;
-        } else if (b0 >= '0' && b0 <= '9') {
-          type = CharType::ARABIC_LETTER;
-        } else {
-          type = CharType::USELESS;
-        }
+        static constexpr ObAsciiCharTypeTable G_ASCII_CHAR_TYPES;
+        type = G_ASCII_CHAR_TYPES.get(b0);
       } else if ((b0 & 0xE0) == 0xC0) {
         if (OB_LIKELY(rem_len >= 2 && (u[1] & 0xC0) == 0x80)) {
           char_len = 2;
