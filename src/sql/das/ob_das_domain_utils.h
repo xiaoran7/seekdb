@@ -51,10 +51,13 @@ public:
   void reset();
   void reuse();
   TO_STRING_KV(K_(row_idx), K_(is_fts_index_aux), K_(helper), K_(is_inited),
-               "row_count", rows_.count());
+               "row_count", word_pairs_.count());
 private:
+  typedef common::hash::HashMapPair<storage::ObFTWord, int64_t> WordPair;
   lib::MemoryContext merge_memctx_;
-  ObDomainIndexRow rows_;
+  blocksstable::ObDatumRow *datum_row_;
+  common::ObSEArray<const WordPair *, 64> word_pairs_;
+  int64_t doc_length_;
   uint64_t row_idx_;
   bool is_fts_index_aux_;
   storage::ObFTParseHelper helper_;
@@ -158,6 +161,7 @@ private:
 
 class ObDASDomainUtils final
 {
+  friend class ObFTIndexRowCache;
 public:
 
   static const uint64_t MVI_FULL_ROWKEY_THRESHOLD = 6;
