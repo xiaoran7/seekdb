@@ -611,13 +611,46 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
     ret = OB_ERR_UNEXPECTED;
   }
   while (OB_SUCC(ret) && !find) {
-    if (cur_idx_ < count_) {
-      if (OB_FAIL(cmp_func_(
-              id_datum, doc_id_[cur_idx_].get_datum(), result, nullptr))) {
-      } else if (result <= 0) {
-        find = true;
-      } else {
-        ++cur_idx_;
+    const int64_t remaining = count_ - cur_idx_;
+    if (remaining > 0) {
+      if (remaining > 4) {
+        // Fast batch skip check: compare with the last element in the current batch
+        if (OB_FAIL(cmp_func_(
+                id_datum, doc_id_[count_ - 1].get_datum(), result, nullptr))) {
+        } else if (result > 0) {
+          // id_datum is strictly greater than all elements in the current batch
+          cur_idx_ = count_;
+          continue;
+        } else {
+          // Target document is within [cur_idx_, count_ - 1], binary search
+          int64_t low = cur_idx_;
+          int64_t high = count_ - 1;
+          while (low < high && OB_SUCC(ret)) {
+            const int64_t mid = low + (high - low) / 2;
+            int mid_res = 0;
+            if (OB_FAIL(cmp_func_(
+                    id_datum, doc_id_[mid].get_datum(), mid_res, nullptr))) {
+            } else if (mid_res <= 0) {
+              high = mid;
+            } else {
+              low = mid + 1;
+            }
+          }
+          if (OB_SUCC(ret)) {
+            cur_idx_ = low;
+            find = true;
+          }
+          continue;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(cmp_func_(
+                id_datum, doc_id_[cur_idx_].get_datum(), result, nullptr))) {
+        } else if (result <= 0) {
+          find = true;
+        } else {
+          ++cur_idx_;
+        }
       }
     } else if (OB_FAIL(token_iter_->advance_to(id_datum))) {
     } else if (OB_FAIL(get_next_row())) {
