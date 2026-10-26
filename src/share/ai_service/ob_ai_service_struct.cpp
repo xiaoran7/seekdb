@@ -33,10 +33,13 @@ const ObString ObAiModelEndpointInfo::DEFAULT_SCOPE = "ALL";
 const char *VALID_PROVIDERS[] = {
   "ALIYUN-OPENAI",
   "ALIYUN-DASHSCOPE",
+  "ALIYUN",
+  "DASHSCOPE",
   "DEEPSEEK",
   "SILICONFLOW",
   "COHERE",
   "HUNYUAN-OPENAI",
+  "HUNYUAN",
   "OPENAI",
   "OLLAMA"
 };
