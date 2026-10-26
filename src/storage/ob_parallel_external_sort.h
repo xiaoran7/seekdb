@@ -52,7 +52,7 @@ struct ObExternalSortConstant
 {
   static const int64_t BUF_HEADER_LENGTH = sizeof(int64_t); //serialization::encoded_length_i64(0);
   static const int64_t MIN_MEMORY_LIMIT = 8 * 1024LL * 1024LL;// min memory limit is 8m
-  static const int64_t DEFAULT_FILE_READ_WRITE_BUFFER = 2 * 1024 * 1024LL; // 2m
+  static const int64_t DEFAULT_FILE_READ_WRITE_BUFFER = 4 * 1024 * 1024LL; // 4m
   static const int64_t MIN_MULTIPLE_MERGE_COUNT = 2;
   static inline int get_io_timeout_ms(const int64_t expire_timestamp, int64_t &wait_time_ms);
   static inline bool is_timeout(const int64_t expire_timestamp);
@@ -1472,6 +1472,10 @@ int ObMemorySortRound<T, Compare>::init(
     compare_ = compare;
     next_round_ = next_round;
     iter_ = NULL;
+    const int64_t est_items = std::min<int64_t>(1024, mem_limit / (sizeof(T) + 64));
+    if (est_items > 0) {
+      (void)item_list_.reserve(est_items);
+    }
   }
   return ret;
 }

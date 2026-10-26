@@ -274,8 +274,11 @@ int sort_and_push_metas(ObArray<ObDDLBlockMeta> &meta_array, ObStorageDatumUtils
   std::sort(meta_array.begin(), meta_array.end(), cmp_less);
   ObArray<ObDDLBlockMeta>::iterator unique_iter = std::unique(meta_array.begin(), meta_array.end(), cmp_equal);
   int64_t unique_count = unique_iter - meta_array.begin();
-  for (int64_t i = 0; OB_SUCC(ret) && i < unique_count; ++i) {
-    if (OB_FAIL(sorted_metas.push_back(meta_array.at(i)))) {
+  if (OB_FAIL(sorted_metas.reserve(sorted_metas.count() + unique_count))) {
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < unique_count; ++i) {
+      if (OB_FAIL(sorted_metas.push_back(meta_array.at(i)))) {
+      }
     }
   }
   return ret;
@@ -475,6 +478,9 @@ int ObDDLMergeTaskUtils::get_sorted_meta_array(
         // do nothing, skip
       } else if (OB_FAIL(block_iter.open(cur_sstable, query_range, read_info, allocator))) {
       } else {
+        if (cur_sstable->get_data_macro_block_count() > 0) {
+          (void)meta_array.reserve(meta_array.count() + cur_sstable->get_data_macro_block_count());
+        }
         ObDataMacroBlockMeta *copied_meta = nullptr; // copied meta will destruct in the meta tree
         while (OB_SUCC(ret)) {
           if (OB_FAIL(block_iter.get_next(data_macro_meta))) {
@@ -489,7 +495,7 @@ int ObDDLMergeTaskUtils::get_sorted_meta_array(
             } else if (FALSE_IT(ddl_block_meta.block_meta_ = copied_meta)) {
             } else if (OB_FAIL(meta_array.push_back(ddl_block_meta))) {
             } else {
-              FLOG_INFO("append meta tree success", K(ret), "table_key", cur_sstable->get_key(), "macro_block_id", data_macro_meta.get_macro_id(),
+              LOG_DEBUG("append meta tree success", K(ret), "table_key", cur_sstable->get_key(), "macro_block_id", data_macro_meta.get_macro_id(),
                   "data_checksum", copied_meta->val_.data_checksum_, K(meta_array.count()), "macro_block_end_key", copied_meta->end_key_);
             }
           }
@@ -509,8 +515,9 @@ int ObDDLMergeTaskUtils::get_sorted_meta_array(
     for (int64_t i = 0; OB_SUCC(ret) && i < sorted_metas.count(); ++i) {
       const ObDataMacroBlockMeta *cur_macro_meta = sorted_metas.at(i).block_meta_;
       sstable_checksum = ob_crc64_sse42(sstable_checksum, &cur_macro_meta->val_.data_checksum_, sizeof(cur_macro_meta->val_.data_checksum_));
-      FLOG_INFO("sorted meta array", K(i), "macro_block_id", cur_macro_meta->get_macro_id(), "data_checksum", cur_macro_meta->val_.data_checksum_, K(sstable_checksum), "macro_block_end_key", cur_macro_meta->end_key_);
+      LOG_DEBUG("sorted meta array", K(i), "macro_block_id", cur_macro_meta->get_macro_id(), "data_checksum", cur_macro_meta->val_.data_checksum_, K(sstable_checksum), "macro_block_end_key", cur_macro_meta->end_key_);
     }
+    LOG_INFO("sorted meta array finished", K(ret), K(sorted_metas.count()), K(sstable_checksum));
   }
   return ret;
 }
