@@ -3666,14 +3666,22 @@ int ObTableScanOp::fetch_next_fts_index_rows()
       ret = OB_ERR_UNEXPECTED;
     } else {
       ObString ft = ft_datum->get_string();
-      ObArenaAllocator tmp_allocator(ObModIds::OB_LOB_ACCESS_BUFFER, OB_MALLOC_NORMAL_BLOCK_SIZE);
-      if (OB_FAIL(ObTextStringHelper::read_real_string_data(get_exec_ctx(),
-                                                            tmp_allocator,
-                                                            *ft_datum,
-                                                            ft_expr->datum_meta_,
-                                                            ft_expr->obj_meta_.has_lob_header(),
-                                                            ft))) {
-      } else if (OB_FAIL(fts_index_.segment(ft_expr->obj_meta_, *doc_id_datum, ft)) &&OB_ITER_END != ret) {
+      if (ft_expr->obj_meta_.has_lob_header()) {
+        ObArenaAllocator tmp_allocator(ObModIds::OB_LOB_ACCESS_BUFFER, OB_MALLOC_NORMAL_BLOCK_SIZE);
+        if (OB_FAIL(ObTextStringHelper::read_real_string_data(get_exec_ctx(),
+                                                              tmp_allocator,
+                                                              *ft_datum,
+                                                              ft_expr->datum_meta_,
+                                                              true,
+                                                              ft))) {
+        } else if (OB_FAIL(fts_index_.segment(ft_expr->obj_meta_, *doc_id_datum, ft)) && OB_ITER_END != ret) {
+        } else if (OB_ITER_END == ret) {
+          has_segment_word = false;
+          ret = OB_SUCCESS;
+        } else {
+          has_segment_word = true;
+        }
+      } else if (OB_FAIL(fts_index_.segment(ft_expr->obj_meta_, *doc_id_datum, ft)) && OB_ITER_END != ret) {
       } else if (OB_ITER_END == ret) {
         has_segment_word = false;
         ret = OB_SUCCESS;

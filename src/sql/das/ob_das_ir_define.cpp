@@ -195,13 +195,14 @@ ObDocIdExt::ObDocIdExt()
 ObDocIdExt::ObDocIdExt(const ObDocIdExt &other)
   : buf_{}, datum_(other.datum_)
 {
-  MEMCPY(buf_, other.buf_, OB_DOC_ID_EXT_SIZE);
+  if (!other.datum_.is_null() && other.datum_.len_ > 0) {
+    MEMCPY(buf_, other.buf_, other.datum_.len_);
+  }
   datum_.ptr_ = buf_;
 }
 
 void ObDocIdExt::reset()
 {
-  MEMSET(buf_, 0, OB_DOC_ID_EXT_SIZE);
   datum_ = ObDatum(buf_, 0, false);
 }
 
@@ -232,8 +233,17 @@ int ObDocIdExt::from_obj(const ObObj &obj)
 int ObDocIdExt::from_datum(const ObDatum &datum)
 {
   int ret = common::OB_SUCCESS;
-  int64_t dummy_pos = 0;
-  if (OB_FAIL(datum_.deep_copy(datum, buf_, OB_DOC_ID_EXT_SIZE, dummy_pos))) {
+  if (OB_UNLIKELY(datum.is_null())) {
+    datum_.ptr_ = buf_;
+    datum_.set_null();
+  } else if (OB_UNLIKELY(datum.len_ > OB_DOC_ID_EXT_SIZE)) {
+    ret = common::OB_BUF_NOT_ENOUGH;
+  } else {
+    if (datum.len_ > 0) {
+      MEMCPY(buf_, datum.ptr_, datum.len_);
+    }
+    datum_.ptr_ = buf_;
+    datum_.pack_ = datum.pack_;
   }
   return ret;
 }
@@ -241,9 +251,11 @@ int ObDocIdExt::from_datum(const ObDatum &datum)
 ObDocIdExt &ObDocIdExt::operator=(const ObDocIdExt &other)
 {
   if (this != &other) {
-    MEMCPY(buf_, other.buf_, OB_DOC_ID_EXT_SIZE);
-    datum_ = other.datum_;
+    if (!other.datum_.is_null() && other.datum_.len_ > 0) {
+      MEMCPY(buf_, other.buf_, other.datum_.len_);
+    }
     datum_.ptr_ = buf_;
+    datum_.pack_ = other.datum_.pack_;
   }
   return *this;
 }

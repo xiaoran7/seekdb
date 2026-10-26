@@ -294,10 +294,36 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
       ret = OB_ERR_UNEXPECTED;
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
-      ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      bool all_ascii = true;
+      bool has_upper_ascii = false;
+      for (uint32_t i = 0; i < norm_token_len; ++i) {
+        const uint8_t ch = static_cast<uint8_t>(norm_token_ptr[i]);
+        if (ch >= 0x80) {
+          all_ascii = false;
+          break;
+        } else if (ch >= 'A' && ch <= 'Z') {
+          has_upper_ascii = true;
+        }
+      }
+      if (all_ascii && !has_upper_ascii) {
+        next_token.set_string(norm_alnum_token);
+      } else if (all_ascii) {
+        char *buf = static_cast<char *>(norm_allocator_.alloc(norm_token_len));
+        if (OB_ISNULL(buf)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          for (uint32_t i = 0; i < norm_token_len; ++i) {
+            const char c = norm_token_ptr[i];
+            buf[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
+          }
+          next_token.set_string(buf, norm_token_len);
+        }
       } else {
-        next_token.set_string(norm_lower_token);
+        ObString norm_lower_token;
+        if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+        } else {
+          next_token.set_string(norm_lower_token);
+        }
       }
     }
   }

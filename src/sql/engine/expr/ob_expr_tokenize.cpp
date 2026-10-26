@@ -86,8 +86,6 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
   int64_t doc_len = 0;
   storage::ObFTWordMap token_map;
 
-  ObArenaAllocator tmp_parse_alloc(ObMemAttr("Tmp buffer"));
-
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(tokenize_helper.init(&allocator, param.parser_name_, param.properties_))) {
@@ -200,12 +198,7 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
 {
   int ret = OB_SUCCESS;
 
-  ObDatum *parser_params_datum;
-  ObString raw_parser_name = ObString::make_string(OB_DEFAULT_FULLTEXT_PARSER_NAME);
-
-  ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  
-  MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator());
+  MultimodeAlloctor temp_allocator(allocator);
 
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
@@ -223,14 +216,10 @@ int ObExprTokenize::construct_ft_parser_inner_name(const ObString &input_str, To
   int ret = OB_SUCCESS;
   storage::ObFTParser parser;
 
-  char *parser_name_buf = nullptr;
-  if (OB_ISNULL(parser_name_buf
-                = static_cast<char *>(param.allocator_.alloc(storage::OB_FT_PARSER_NAME_LENGTH)))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(parser.init(input_str))) {
-  } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
+  if (OB_FAIL(parser.init(input_str))) {
+  } else if (OB_FAIL(parser.serialize_to_str(param.parser_name_buf_, sizeof(param.parser_name_buf_)))) {
   } else {
-    param.parser_name_ = ObString::make_string(parser_name_buf);
+    param.parser_name_ = ObString::make_string(param.parser_name_buf_);
   }
   return ret;
 }
@@ -375,6 +364,17 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
 int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &properties)
 {
   int ret = OB_SUCCESS;
+  if (properties.empty()) {
+    storage::ObFTParser parser;
+    if (OB_UNLIKELY(parser_name_.empty())) {
+      ret = OB_INVALID_ARGUMENT;
+    } else if (OB_FAIL(parser.parse_from_str(parser_name_.ptr(), parser_name_.length()))) {
+    } else if (OB_UNLIKELY(!parser.is_ik() && !parser.is_space() && !parser.is_ngram()
+                           && !parser.is_beng() && !parser.is_ngram2())) {
+      ret = OB_FUNCTION_NOT_DEFINED;
+    }
+    return ret;
+  }
   storage::ObFTParserJsonProps parser_properties;
 
   if (OB_FAIL(parser_properties.init())) {

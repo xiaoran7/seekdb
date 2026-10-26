@@ -69,6 +69,7 @@ private:
   public:
     // for property and tmp json string
     mutable ObArenaAllocator allocator_;
+    char parser_name_buf_[64];
     ObString parser_name_;
     ObString properties_;
     ObObjMeta meta_;

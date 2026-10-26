@@ -125,6 +125,7 @@ private:
   int groupby_word(const ObFTWord &word, const int64_t word_cnt);
 private:
   ObObjMeta word_meta_;
+  const common::ObCharsetInfo *cs_;
   common::ObIAllocator &allocator_;
   ObFTWordMap &word_map_;
   int64_t min_max_word_cnt_;
@@ -133,6 +134,7 @@ private:
   int64_t min_token_size_;
   int64_t max_token_size_;
   ObAddWordFlag flag_;
+  char casedown_buf_[512];
 };
 
 } // end namespace storage

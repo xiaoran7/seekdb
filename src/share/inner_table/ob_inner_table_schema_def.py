@@ -2441,7 +2441,8 @@ all_ai_model_endpoint_def = dict(
         ('request_model_name', 'varchar:128', 'true'),
         ('parameters', 'varchar:2048', 'true'),
         ('request_transform_fn', 'varchar:64', 'true'),
-        ('response_transform_fn', 'varchar:64', 'true')
+        ('response_transform_fn', 'varchar:64', 'true'),
+        ('max_concurrency', 'int', 'true')
     ]
 )
 def_table_schema(**all_ai_model_endpoint_def)
@@ -13819,7 +13820,8 @@ def_table_schema(
       REQUEST_MODEL_NAME,
       PARAMETERS,
       REQUEST_TRANSFORM_FN,
-      RESPONSE_TRANSFORM_FN
+      RESPONSE_TRANSFORM_FN,
+      CASE WHEN MAX_CONCURRENCY IS NULL OR MAX_CONCURRENCY <= 0 THEN NULL ELSE MAX_CONCURRENCY END AS MAX_CONCURRENCY
     FROM oceanbase.__all_ai_model_endpoint WHERE ENDPOINT_ID != -1;
   """.replace("\n", " ")
 )
