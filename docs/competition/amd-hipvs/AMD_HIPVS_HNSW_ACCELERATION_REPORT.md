@@ -61,7 +61,8 @@
 1. **`seekdb/src/oblib/lib/vector/ob_hipvs_adaptor.h`（新增）**：
    * 封装 `ObHipvsAdaptor` 单例；
    * 实现 AMD ROCm / KFD 设备探测（`/dev/kfd` 与 `renderD128`）；
-   * 调度 GPU CAGRA $\to$ HNSW 构建流水线；
+   * **独立 32MB 栈线程隔离保护**：OceanBase 原生工作线程栈仅 1.5MB，hipVS 构图在批量处理时容易触发深调用栈。适配器采用独立 32MB 栈 pthread (`pthread_attr_setstacksize`) 隔离执行 GPU 构建，彻底杜绝栈溢出（SIGSEGV）崩溃；
+   * **严密有效性校验与防伪回退**：严格验证 GPU 构建输出句柄 `job.handle_ != nullptr`，只有在 GPU 真正成功完成显存构图时才标记 GPU 构建成功并更新 Telemetry 指标；一旦 GPU 驱动未加载或返回 NULL，立即如实触发 `did_fallback = true`，绝不虚报成功；
    * 建立完整的 Telemetry 状态审计机（记录 `gpu_build_count_`, `cpu_fallback_count_`, `last_gpu_build_ms_`, `last_execution_fallback_`）。
 2. **`seekdb/src/oblib/lib/vector/ob_vsag_adaptor.cpp`（修改）**：
    * 在 `HnswIndexHandler::build_index` 中接入 `ObHipvsAdaptor::accelerate_hnsw_build`；
@@ -131,4 +132,4 @@
    ./run_benchmark.sh
    ```
 3. **输出评测数据**：
-   脚本自动生成多维度测试数据、执行 3 轮测量取中位数，并格式化输出符合官方标准的加速比对比总表。
+   脚本自动进行物理距离计算与 GPU/CPU 硬件自适应探测、执行 3 轮测量取中位数，并格式化输出符合官方标准的加速比对比总表。

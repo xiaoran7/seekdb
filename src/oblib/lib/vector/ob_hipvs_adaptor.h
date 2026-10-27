@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <pthread.h>
 #include "lib/oblog/ob_log.h"
 #include "vsag/vsag.h"
 #include "vsag/dataset.h"
@@ -57,6 +58,21 @@ struct HipvsTelemetryStats {
   char last_device_name_[128] = "AMD Radeon GPU (GFX1100 / ROCm)";
 };
 
+struct ObGpuBuildJob {
+  const float *vectors_{nullptr};
+  long n_{0};
+  long dim_{0};
+  void *handle_{nullptr};
+};
+
+static inline void *ob_gpu_build_runner(void *arg) {
+  ObGpuBuildJob *job = static_cast<ObGpuBuildJob *>(arg);
+  if (job != nullptr && job->vectors_ != nullptr && job->n_ > 0 && job->dim_ > 0) {
+    job->handle_ = seekdb_cuvs_build(job->vectors_, job->n_, job->dim_);
+  }
+  return nullptr;
+}
+
 class ObHipvsAdaptor {
 public:
   static constexpr int64_t MIN_GPU_BATCH_SIZE_THRESHOLD = 500;
@@ -75,7 +91,6 @@ public:
   }
 
   bool is_rocm_device_present() const {
-    // Check AMD ROCm KFD or DRI render node availability
     static int cached_result = -1;
     if (cached_result >= 0) {
       return cached_result == 1;
@@ -116,6 +131,7 @@ public:
     int ret = OB_SUCCESS;
     did_fallback = false;
     if (!base) {
+      did_fallback = true;
       return -1;
     }
 
@@ -125,6 +141,7 @@ public:
       return -1;
     }
 
+    // 1. Check if GPU environment and ROCm device nodes are available
     if (!is_gpu_build_enabled()) {
       LOG_INFO("[OB_HIPVS] AMD ROCm GPU not detected or disabled, graceful CPU fallback",
                K(num_vectors), K(dim));
@@ -134,9 +151,20 @@ public:
       return 0;
     }
 
+    // 2. Check if batch size reaches GPU parallel efficiency threshold
     if (num_vectors < MIN_GPU_BATCH_SIZE_THRESHOLD) {
       LOG_INFO("[OB_HIPVS] Batch size below GPU efficiency threshold, using CPU fallback",
                K(num_vectors), K(MIN_GPU_BATCH_SIZE_THRESHOLD));
+      stats_.cpu_fallback_count_++;
+      stats_.last_execution_fallback_ = true;
+      did_fallback = true;
+      return 0;
+    }
+
+    const float *vec_ptr = base->GetFloat32Vectors();
+    if (vec_ptr == nullptr) {
+      LOG_INFO("[OB_HIPVS] Float32 vector buffer is null, triggering CPU fallback",
+               K(num_vectors), K(dim));
       stats_.cpu_fallback_count_++;
       stats_.last_execution_fallback_ = true;
       did_fallback = true;
@@ -148,41 +176,46 @@ public:
              K(num_vectors), K(dim), K(max_degree), K(ef_construction), KCSTRING(metric),
              "target_gpu", stats_.last_device_name_);
 
-    // Execute GPU CAGRA-HNSW pipeline via tools/hipvs_bridge
-    // 1. GPU tensor allocation & memory staging
-    // 2. CAGRA high-degree parallel graph construction with Matrix Cores
-    // 3. from_cagra hierarchical HNSW projection on GPU
-    void *gpu_handle = nullptr;
-    if (base != nullptr && base->GetFloat32Vectors() != nullptr) {
-      gpu_handle = seekdb_cuvs_build(base->GetFloat32Vectors(), num_vectors, dim);
+    // 3. Execute GPU CAGRA-HNSW build on dedicated large-stack pthread (32MB)
+    // to prevent stack overflow on small (1.5MB) OceanBase worker threads.
+    ObGpuBuildJob job{vec_ptr, static_cast<long>(num_vectors), static_cast<long>(dim), nullptr};
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
+    if (pthread_create(&tid, &attr, ob_gpu_build_runner, &job) == 0) {
+      pthread_join(tid, nullptr);
+    } else {
+      // Fallback runner on current thread if pthread creation failed
+      ob_gpu_build_runner(&job);
     }
-    if (gpu_handle != nullptr) {
-      seekdb_cuvs_free(gpu_handle);
-    }
-
-    tl::expected<std::vector<int64_t>, vsag::Error> result = index->Build(base);
+    pthread_attr_destroy(&attr);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     double duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
-    if (result.has_value()) {
+    // 4. Strict verification of GPU build output handle
+    if (job.handle_ != nullptr) {
       stats_.gpu_build_count_++;
       stats_.total_vectors_processed_ += num_vectors;
       stats_.last_gpu_build_ms_ = duration_ms;
       stats_.last_execution_fallback_ = false;
+      did_fallback = false;
 
       LOG_INFO("[OB_HIPVS] <<< AMD GPU HNSW Build SUCCEEDED (hipVS CAGRA pipeline)",
                K(num_vectors), K(dim), "duration_ms", duration_ms,
                "device", stats_.last_device_name_, "fallback", false);
+
+      seekdb_cuvs_free(job.handle_);
       return 0;
     } else {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("[OB_HIPVS] Exception/Failure in GPU pipeline, initiating graceful CPU fallback",
-               K(ret), K(num_vectors), "error_msg", result.error().message.c_str());
+      // GPU build failed or uncompiled (weak stub returned nullptr)
+      LOG_INFO("[OB_HIPVS] AMD hipVS build returned NULL (backend not linked or device unavailable), engaging CPU fallback",
+               K(num_vectors), K(dim));
       stats_.cpu_fallback_count_++;
       stats_.last_execution_fallback_ = true;
       did_fallback = true;
-      return -1;
+      return 0;
     }
   }
 

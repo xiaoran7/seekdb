@@ -385,15 +385,16 @@ int ObAIFuncClient::get_batch_result(ObArray<ObJsonObject *> &responses)
   return ret;
 }
 
-int ObAIFuncClient::init_easy_handle(CURL *curl, ObJsonObject *body, ObStringBuffer &response_buf) 
+int ObAIFuncClient::init_easy_handle(CURL *curl, ObJsonObject *body, ObStringBuffer &response_buf)
 {
   int ret = OB_SUCCESS;
   ObJsonBuffer j_buf(allocator_);
+  ObString body_str;
   if (OB_FAIL(body->print(j_buf, false))) {
   } else if (OB_ISNULL(curl)) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(j_buf.get_result_string(body_str))) {
   }
-  ObString body_str = j_buf.string();
   CURLcode res;
   const int64_t no_delay = 1;
   const int64_t no_signal = 1;
@@ -413,10 +414,10 @@ int ObAIFuncClient::init_easy_handle(CURL *curl, ObJsonObject *body, ObStringBuf
       LOG_WARN("set timeout failed", K(res), K(timeout_sec_));
     } else if (CURLE_OK !=(res = curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list_))) {
       LOG_WARN("set headers failed", K(res));
-    } else if (CURLE_OK !=(res = curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.ptr()))) {
-      LOG_WARN("set post failed", K(res), K(body_str.ptr()));
-    } else if (CURLE_OK != (res = curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,body_str.length()))) {
+    } else if (CURLE_OK != (res = curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body_str.length()))) {
       LOG_WARN("set post failed", K(res), K(body_str.length()));
+    } else if (CURLE_OK != (res = curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, body_str.ptr()))) {
+      LOG_WARN("set post failed", K(res), K(body_str.ptr()));
     } else if (CURLE_OK != (res = curl_easy_setopt(curl, CURLOPT_POST, 1))) {
       LOG_WARN("set post method failed", K(res));
     }

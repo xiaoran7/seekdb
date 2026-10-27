@@ -116,30 +116,52 @@ bool is_int_text(const char *ptr, const int64_t len)
   for (; ans && i < len; ++i) {
     ans = (ptr[i] >= '0' && ptr[i] <= '9');
   }
+  const int64_t digit_len = (len > 0 && ('-' == ptr[0] || '+' == ptr[0])) ? (len - 1) : len;
+  if (ans && digit_len > 18) {
+    if (digit_len > 19) {
+      ans = false;
+    } else {
+      errno = 0;
+      char *end = NULL;
+      (void)strtoll(ptr, &end, 10);
+      if (ERANGE == errno) {
+        ans = false;
+      }
+    }
+  }
   return ans;
 }
 
 bool is_double_text(const char *ptr, const int64_t len)
 {
-  bool ans = (len > 0);
+  if (len <= 0) return false;
   bool has_digit = false;
+  int dot_count = 0;
+  int exp_count = 0;
   int64_t i = 0;
-  if (ans && ('-' == ptr[0] || '+' == ptr[0])) {
+  if ('-' == ptr[0] || '+' == ptr[0]) {
     i = 1;
+    if (len == 1) return false;
   }
-  for (; ans && i < len; ++i) {
+  for (; i < len; ++i) {
     const char c = ptr[i];
     if (c >= '0' && c <= '9') {
       has_digit = true;
-    } else if ('.' == c || 'e' == c || 'E' == c) {
-      // allowed
-    } else if (('-' == c || '+' == c) && ('e' == ptr[i - 1] || 'E' == ptr[i - 1])) {
-      // exponent sign
+    } else if ('.' == c) {
+      ++dot_count;
+      if (dot_count > 1 || exp_count > 0) return false;
+    } else if ('e' == c || 'E' == c) {
+      ++exp_count;
+      if (exp_count > 1 || !has_digit) return false;
+      if (i + 1 < len && ('-' == ptr[i + 1] || '+' == ptr[i + 1])) {
+        ++i;
+      }
+      if (i + 1 >= len) return false;
     } else {
-      ans = false;
+      return false;
     }
   }
-  return ans && has_digit;
+  return has_digit && (dot_count == 1 || exp_count == 1);
 }
 
 bool is_bool_text(const char *ptr, const int64_t len)
@@ -1533,7 +1555,7 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
   int ret = OB_SUCCESS;
   ObArenaAllocator row_allocator;
   ObSEArray<CsvField, 16> fields;
-  bool first_row = true;
+  int64_t line_no = 0;
   int64_t pos = 0;
   ObString nullstr = options_.nullstr_;
   while (OB_SUCC(ret) && pos <= len) {
@@ -1606,7 +1628,15 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
     if (OB_FAIL(ret) || 0 == fields.count()) {
       break;
     }
-    if (first_row && options_.header_) {
+    ++line_no;
+    if (line_no <= options_.skip_header_) {
+      if (end_of_file) {
+        break;
+      }
+      continue;
+    }
+    const bool is_header_row = (options_.header_ && line_no == options_.skip_header_ + 1);
+    if (is_header_row) {
       // The header row names the columns; the schema starts out with null type and is
       // inferred from the data rows below.
       for (int64_t i = 0; OB_SUCC(ret) && i < fields.count(); ++i) {
@@ -1622,9 +1652,8 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
           }
         }
       }
-      first_row = false;
     } else {
-      if (first_row) {
+      if (schema_.columns().empty()) {
         // No header: name the columns column0, column1, ... the way DuckDB does.
         for (int64_t i = 0; OB_SUCC(ret) && i < fields.count(); ++i) {
           ObFileTableColumn column;
@@ -1640,7 +1669,6 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
             }
           }
         }
-        first_row = false;
       }
       for (int64_t i = 0; OB_SUCC(ret) && i < schema_.columns().count(); ++i) {
         if (i >= fields.count() || fields.at(i).is_null_) {
@@ -1754,7 +1782,7 @@ int ObFileTableReader::read_csv(const char *data, const int64_t len,
       }
       ++line_no;
       if (line_no <= options_.skip_header_ ||
-          (1 == line_no && options_.header_)) {
+          (options_.header_ && line_no == options_.skip_header_ + 1)) {
         if (end_of_file) {
           break;
         }
@@ -2097,11 +2125,19 @@ int ObFileTableReader::append_value(common::ObIArray<common::ObObjParam> &objs,
       break;
     }
     case ObIntType: {
-      obj.set_int(static_cast<int64_t>(strtoll(ptr, NULL, 10)));
+      if (is_bool_text(ptr, len)) {
+        obj.set_int(0 == strncasecmp(ptr, "true", 4) ? 1 : 0);
+      } else {
+        obj.set_int(static_cast<int64_t>(strtoll(ptr, NULL, 10)));
+      }
       break;
     }
     case ObDoubleType: {
-      obj.set_double(strtod(ptr, NULL));
+      if (is_bool_text(ptr, len)) {
+        obj.set_double(0 == strncasecmp(ptr, "true", 4) ? 1.0 : 0.0);
+      } else {
+        obj.set_double(strtod(ptr, NULL));
+      }
       break;
     }
     case ObDateType: {
