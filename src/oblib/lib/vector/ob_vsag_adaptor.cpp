@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX LIB
 
 #include "ob_vsag_adaptor.h"
+#include "ob_hipvs_adaptor.h"
 #include <map>
 #include "vsag/vsag.h"
 #include "vsag/errors.h"
@@ -219,10 +220,19 @@ int HnswIndexHandler::build_index(const vsag::DatasetPtr &base)
 {
   int ret = OB_SUCCESS;
   try {
-    tl::expected<std::vector<int64_t>, Error> result = index_->Build(base);
-    if (result.has_value()) {
+    bool did_fallback = false;
+    int hipvs_ret = obhipvs::ObHipvsAdaptor::get_instance().accelerate_hnsw_build(
+        base, dim_, max_degree_, ef_construction_, metric_, index_, did_fallback);
+
+    if (OB_SUCC(hipvs_ret) && !did_fallback) {
+      LOG_INFO("[OBVSAG] HnswIndexHandler::build_index accelerated by AMD hipVS",
+               K(dim_), K(max_degree_), K(ef_construction_));
     } else {
-      ret = vsag_errcode2ob(result.error().type);
+      tl::expected<std::vector<int64_t>, Error> result = index_->Build(base);
+      if (result.has_value()) {
+      } else {
+        ret = vsag_errcode2ob(result.error().type);
+      }
     }
   } catch (const std::exception &e) {
     ret = OB_ERR_VSAG_RETURN_ERROR;

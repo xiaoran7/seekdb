@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX LIB
 
 #include "ob_vector_util.h"
+#include "ob_hipvs_adaptor.h"
 #include "lib/string/ob_string.h"
 
 namespace oceanbase {
@@ -250,6 +251,16 @@ uint64_t estimate_memory(obvsag::VectorIndexPtr& index_handler, const uint64_t r
 int immutable_optimize(obvsag::VectorIndexPtr& index_handler)
 {
   return obvsag::immutable_optimize(index_handler);
+}
+
+bool is_hipvs_gpu_build_available()
+{
+  return obhipvs::ObHipvsAdaptor::get_instance().is_gpu_build_enabled();
+}
+
+bool get_last_build_was_gpu()
+{
+  return !obhipvs::ObHipvsAdaptor::get_instance().get_stats().last_execution_fallback_;
 }
 
 } //namespace obvectorlib

@@ -145,6 +145,8 @@ int fdeserialize(obvsag::VectorIndexPtr& index_handler, std::istream& in_stream)
 int delete_index(obvsag::VectorIndexPtr& index_handler);
 void delete_iter_ctx(void *iter_ctx);
 int immutable_optimize(obvsag::VectorIndexPtr& index_handler);
+bool is_hipvs_gpu_build_available();
+bool get_last_build_was_gpu();
 } // namesapce obvectorutil
 } // namespace common
 } // namespace oceanbase
