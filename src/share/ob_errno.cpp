@@ -13911,7 +13911,7 @@ static const _error _error_OB_ERR_AI_COLUMN_NOT_READY = {
       .mysql_errno           = -1,
       .sqlstate              = "HY000",
       .str_error             = "AI column is not ready",
-      .str_user_error        = "AI column is not ready: table_id=%lu, column_id=%lu"
+      .str_user_error        = "AI column has unfinished tasks for table_id=%lu, column_id=%lu"
 };
 static const _error _error_OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN = {
       .error_name            = "OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN",

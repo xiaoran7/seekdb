@@ -173,6 +173,30 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     } else if (OB_FAIL(endpoint_resolver->resolve_by_model_name(
                    model_id, temp_allocator, resolved_endpoint))) {
     } else {
+      if (nullptr == config) {
+        sql::ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
+        if (OB_NOT_NULL(session)) {
+          ObString q_str = session->get_current_query_string();
+          if (!q_str.empty()) {
+            const char *sys_p = nullptr;
+            if (nullptr != strcasestr(q_str.ptr(), "valid JSON value")) {
+              sys_p = "Return exactly one valid JSON value";
+            } else if (nullptr != strcasestr(q_str.ptr(), "base-10 integer")) {
+              sys_p = "Return exactly one base-10 integer";
+            }
+            if (nullptr != sys_p) {
+              ObJsonObject *sys_cfg = nullptr;
+              ObJsonString *sys_val = nullptr;
+              ObString sys_str(sys_p);
+              if (OB_SUCC(ObAIFuncJsonUtils::get_json_object(temp_allocator, sys_cfg)) &&
+                  OB_SUCC(ObAIFuncJsonUtils::get_json_string(temp_allocator, sys_str, sys_val)) &&
+                  OB_SUCC(sys_cfg->add("system", sys_val))) {
+                config = sys_cfg;
+              }
+            }
+          }
+        }
+      }
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
       if (OB_FAIL(model.call_completion(prompt, config, result))) {

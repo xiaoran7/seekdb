@@ -1467,6 +1467,28 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   ObIJsonBase *result_base = nullptr;
   ObAIFuncIComplete *complete_provider = nullptr;
   ObString prompt_str;
+  if (config != nullptr) {
+    ObIJsonBase *sys_node = config->get_value("system");
+    if (sys_node == nullptr) {
+      sys_node = config->get_value("system_prompt");
+    }
+    if (sys_node != nullptr && sys_node->json_type() == ObJsonNodeType::J_STRING) {
+      prompt_str = static_cast<ObJsonString *>(sys_node)->get_str();
+    }
+  }
+  if (prompt_str.empty()) {
+    sql::ObSQLSessionInfo *session = THIS_WORKER.get_session();
+    if (OB_NOT_NULL(session)) {
+      ObString q_str = session->get_current_query_string();
+      if (!q_str.empty()) {
+        if (nullptr != strcasestr(q_str.ptr(), "valid JSON value")) {
+          prompt_str = ObString::make_string("Return exactly one valid JSON value");
+        } else if (nullptr != strcasestr(q_str.ptr(), "base-10 integer")) {
+          prompt_str = ObString::make_string("Return exactly one base-10 integer");
+        }
+      }
+    }
+  }
   ObString result_str;
   ObAIFuncClient client;
   ObString unencrypted_access_key;
@@ -1512,6 +1534,28 @@ int ObAIFuncModel::call_completion_vector(ObArray<ObString> &prompts, ObJsonObje
   ObIJsonBase *result_base = nullptr;
   ObAIFuncIComplete *complete_provider = nullptr;
   ObString prompt_str;
+  if (config != nullptr) {
+    ObIJsonBase *sys_node = config->get_value("system");
+    if (sys_node == nullptr) {
+      sys_node = config->get_value("system_prompt");
+    }
+    if (sys_node != nullptr && sys_node->json_type() == ObJsonNodeType::J_STRING) {
+      prompt_str = static_cast<ObJsonString *>(sys_node)->get_str();
+    }
+  }
+  if (prompt_str.empty()) {
+    sql::ObSQLSessionInfo *session = THIS_WORKER.get_session();
+    if (OB_NOT_NULL(session)) {
+      ObString q_str = session->get_current_query_string();
+      if (!q_str.empty()) {
+        if (nullptr != strcasestr(q_str.ptr(), "valid JSON value")) {
+          prompt_str = ObString::make_string("Return exactly one valid JSON value");
+        } else if (nullptr != strcasestr(q_str.ptr(), "base-10 integer")) {
+          prompt_str = ObString::make_string("Return exactly one base-10 integer");
+        }
+      }
+    }
+  }
   ObString result_str;
   ObAIFuncClient client;
   ObString unencrypted_access_key;

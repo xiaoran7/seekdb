@@ -201,6 +201,30 @@ int ObAiColumnWorkerTask::do_work()
       }
     }
 
+    bool is_stale = false;
+    ObSqlString check_stale_sql;
+    check_stale_sql.assign_fmt(
+        "SELECT count(*) AS cnt FROM oceanbase.__all_ai_column_task "
+        "WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
+        item.table_id_, item.column_id_, item.rowkey_hash_, item.request_id_);
+    SMART_VAR(ObMySQLProxy::MySQLResult, c_res) {
+      ObMySQLResult *res_ptr = nullptr;
+      int64_t cnt = 0;
+      if (OB_SUCC(sql_proxy->read(c_res, check_stale_sql.ptr())) && OB_NOT_NULL(res_ptr = c_res.get_result())) {
+        if (OB_SUCC(res_ptr->next())) {
+          EXTRACT_INT_FIELD_MYSQL(*res_ptr, "cnt", cnt, int64_t);
+          if (cnt == 0) {
+            is_stale = true;
+          }
+        }
+      }
+    }
+
+    if (is_stale) {
+      LOG_INFO("late old ai task dropped", K(item.table_id_), K(item.column_id_), K(item.request_id_));
+      continue;
+    }
+
     if (!eval_succ) {
       int64_t new_retry = item.retry_count_ + 1;
       if (new_retry < ai_schema.max_retries_) {
@@ -211,128 +235,106 @@ int ObAiColumnWorkerTask::do_work()
             "WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
             new_retry, item.table_id_, item.column_id_, item.rowkey_hash_, item.request_id_);
         sql_proxy->write(retry_sql.ptr(), aff);
+        continue;
       } else {
-        char state_col_name[OB_MAX_COLUMN_NAME_LENGTH];
-        snprintf(state_col_name, sizeof(state_col_name), "__ai_state_%.*s",
-                 ai_schema.column_name_.length(), ai_schema.column_name_.ptr());
-        ObSqlString fail_sql;
+        ObSqlString fail_task_sql;
         int64_t aff = 0;
-        fail_sql.assign_fmt("UPDATE `%s`.`%s` SET `%s` = %d WHERE %s",
-                            db_name, table_name, state_col_name,
-                            static_cast<int>(share::AI_COLUMN_TASK_FAILED),
-                            item.rowkey_pred_);
-        sql_proxy->write(fail_sql.ptr(), aff);
-
-        ObSqlString del_sql;
-        del_sql.assign_fmt(
-            "DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
+        fail_task_sql.assign_fmt(
+            "UPDATE oceanbase.__all_ai_column_task SET state = %d "
+            "WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
+            static_cast<int>(share::AI_COLUMN_TASK_TERMINAL_FAILED),
             item.table_id_, item.column_id_, item.rowkey_hash_, item.request_id_);
-        sql_proxy->write(del_sql.ptr(), aff);
+        sql_proxy->write(fail_task_sql.ptr(), aff);
       }
     } else {
-      bool is_stale = false;
-      ObSqlString check_stale_sql;
-      check_stale_sql.assign_fmt(
-          "SELECT count(*) AS cnt FROM oceanbase.__all_ai_column_task "
-          "WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
-          item.table_id_, item.column_id_, item.rowkey_hash_, item.request_id_);
-      SMART_VAR(ObMySQLProxy::MySQLResult, c_res) {
-        ObMySQLResult *res_ptr = nullptr;
-        int64_t cnt = 0;
-        if (OB_SUCC(sql_proxy->read(c_res, check_stale_sql.ptr())) && OB_NOT_NULL(res_ptr = c_res.get_result())) {
-          if (OB_SUCC(res_ptr->next())) {
-            EXTRACT_INT_FIELD_MYSQL(*res_ptr, "cnt", cnt, int64_t);
-            if (cnt == 0) {
-              is_stale = true;
-            }
-          }
-        }
-      }
-
-      if (is_stale) {
-        LOG_INFO("late old ai result dropped", K(item.table_id_), K(item.column_id_), K(item.request_id_));
-        continue;
-      }
-
       ObSqlString escaped_res;
       escape_sql_string(res_buf, strlen(res_buf), escaped_res);
       ObSqlString save_task_sql;
       int64_t aff = 0;
       save_task_sql.assign_fmt(
-          "UPDATE oceanbase.__all_ai_column_task SET state = 2, request = '%.*s' "
+          "UPDATE oceanbase.__all_ai_column_task SET state = %d, request = '%.*s' "
           "WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
+          static_cast<int>(share::AI_COLUMN_TASK_READY),
           static_cast<int32_t>(escaped_res.length()), escaped_res.ptr(),
           item.table_id_, item.column_id_, item.rowkey_hash_, item.request_id_);
       sql_proxy->write(save_task_sql.ptr(), aff);
+    }
 
-      int64_t unready_count = 0;
-      ObSqlString unready_sql;
-      unready_sql.assign_fmt(
-          "SELECT count(*) AS cnt FROM oceanbase.__all_ai_column_task "
-          "WHERE table_id = %lu AND rowkey_hash = %lu AND request_id = %lu AND state != 2",
-          item.table_id_, item.rowkey_hash_, item.request_id_);
-      SMART_VAR(ObMySQLProxy::MySQLResult, u_res) {
-        ObMySQLResult *res_ptr = nullptr;
-        if (OB_SUCC(sql_proxy->read(u_res, unready_sql.ptr())) && OB_NOT_NULL(res_ptr = u_res.get_result())) {
-          if (OB_SUCC(res_ptr->next())) {
-            EXTRACT_INT_FIELD_MYSQL(*res_ptr, "cnt", unready_count, int64_t);
-          }
+    int64_t unready_count = 0;
+    ObSqlString unready_sql;
+    unready_sql.assign_fmt(
+        "SELECT count(*) AS cnt FROM oceanbase.__all_ai_column_task "
+        "WHERE table_id = %lu AND rowkey_hash = %lu AND request_id = %lu AND state IN (0, 1, 3)",
+        item.table_id_, item.rowkey_hash_, item.request_id_);
+    SMART_VAR(ObMySQLProxy::MySQLResult, u_res) {
+      ObMySQLResult *res_ptr = nullptr;
+      if (OB_SUCC(sql_proxy->read(u_res, unready_sql.ptr())) && OB_NOT_NULL(res_ptr = u_res.get_result())) {
+        if (OB_SUCC(res_ptr->next())) {
+          EXTRACT_INT_FIELD_MYSQL(*res_ptr, "cnt", unready_count, int64_t);
         }
       }
+    }
 
-      if (unready_count == 0) {
-        ObSqlString ready_tasks_sql;
-        ready_tasks_sql.assign_fmt(
-            "SELECT t.column_id, t.request, c.column_name "
-            "FROM oceanbase.__all_ai_column_task t JOIN oceanbase.__all_ai_column c "
-            "  ON t.table_id = c.table_id AND t.column_id = c.column_id "
-            "WHERE t.table_id = %lu AND t.rowkey_hash = %lu AND t.request_id = %lu",
-            item.table_id_, item.rowkey_hash_, item.request_id_);
+    if (unready_count == 0) {
+      ObSqlString group_tasks_sql;
+      group_tasks_sql.assign_fmt(
+          "SELECT t.column_id, t.state, t.request, c.column_name "
+          "FROM oceanbase.__all_ai_column_task t JOIN oceanbase.__all_ai_column c "
+          "  ON t.table_id = c.table_id AND t.column_id = c.column_id "
+          "WHERE t.table_id = %lu AND t.rowkey_hash = %lu AND t.request_id = %lu",
+          item.table_id_, item.rowkey_hash_, item.request_id_);
 
-        ObSqlString update_row_sql;
-        update_row_sql.assign_fmt("UPDATE `%s`.`%s` SET ", db_name, table_name);
+      ObSqlString update_row_sql;
+      update_row_sql.assign_fmt("UPDATE `%s`.`%s` SET ", db_name, table_name);
 
-        bool first_set = true;
-        SMART_VAR(ObMySQLProxy::MySQLResult, r_res) {
-          ObMySQLResult *res_ptr = nullptr;
-          if (OB_SUCC(sql_proxy->read(r_res, ready_tasks_sql.ptr())) && OB_NOT_NULL(res_ptr = r_res.get_result())) {
-            while (OB_SUCC(res_ptr->next())) {
-              uint64_t cid = 0;
-              ObString col_n;
-              ObString result_val;
-              EXTRACT_INT_FIELD_MYSQL(*res_ptr, "column_id", cid, uint64_t);
-              EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "column_name", col_n);
-              EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "request", result_val);
-              if (OB_SUCC(ret)) {
-                if (!first_set) {
-                  update_row_sql.append_fmt(", ");
-                }
-                first_set = false;
-                char s_col[OB_MAX_COLUMN_NAME_LENGTH];
-                snprintf(s_col, sizeof(s_col), "__ai_state_%.*s", col_n.length(), col_n.ptr());
+      bool first_set = true;
+      SMART_VAR(ObMySQLProxy::MySQLResult, r_res) {
+        ObMySQLResult *res_ptr = nullptr;
+        if (OB_SUCC(sql_proxy->read(r_res, group_tasks_sql.ptr())) && OB_NOT_NULL(res_ptr = r_res.get_result())) {
+          while (OB_SUCC(res_ptr->next())) {
+            uint64_t cid = 0;
+            int64_t t_state = 0;
+            ObString col_n;
+            ObString result_val;
+            EXTRACT_INT_FIELD_MYSQL(*res_ptr, "column_id", cid, uint64_t);
+            EXTRACT_INT_FIELD_MYSQL(*res_ptr, "state", t_state, int64_t);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "column_name", col_n);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "request", result_val);
+            if (OB_SUCC(ret)) {
+              if (!first_set) {
+                update_row_sql.append_fmt(", ");
+              }
+              first_set = false;
+              char s_col[OB_MAX_COLUMN_NAME_LENGTH];
+              snprintf(s_col, sizeof(s_col), "__ai_state_%.*s", col_n.length(), col_n.ptr());
+              if (t_state == static_cast<int64_t>(share::AI_COLUMN_TASK_READY)) {
                 ObSqlString escaped_val;
                 escape_sql_string(result_val.ptr(), result_val.length(), escaped_val);
                 update_row_sql.append_fmt("`%.*s` = '%.*s', `%s` = %d",
                                           col_n.length(), col_n.ptr(),
                                           static_cast<int32_t>(escaped_val.length()), escaped_val.ptr(),
                                           s_col, static_cast<int>(share::AI_COLUMN_TASK_READY));
+              } else {
+                update_row_sql.append_fmt("`%.*s` = NULL, `%s` = %d",
+                                          col_n.length(), col_n.ptr(),
+                                          s_col, static_cast<int>(share::AI_COLUMN_TASK_FAILED));
               }
             }
           }
         }
+      }
 
-        if (!first_set) {
-          update_row_sql.append_fmt(" WHERE %s", item.rowkey_pred_);
-          int64_t aff_rows = 0;
-          sql_proxy->write(update_row_sql.ptr(), aff_rows);
+      if (!first_set) {
+        update_row_sql.append_fmt(" WHERE %s", item.rowkey_pred_);
+        int64_t aff_rows = 0;
+        sql_proxy->write(update_row_sql.ptr(), aff_rows);
 
-          ObSqlString del_done_sql;
-          del_done_sql.assign_fmt(
-              "DELETE FROM oceanbase.__all_ai_column_task "
-              "WHERE table_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
-              item.table_id_, item.rowkey_hash_, item.request_id_);
-          sql_proxy->write(del_done_sql.ptr(), aff_rows);
-        }
+        ObSqlString del_done_sql;
+        del_done_sql.assign_fmt(
+            "DELETE FROM oceanbase.__all_ai_column_task "
+            "WHERE table_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
+            item.table_id_, item.rowkey_hash_, item.request_id_);
+        sql_proxy->write(del_done_sql.ptr(), aff_rows);
       }
     }
   }

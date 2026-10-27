@@ -2664,7 +2664,6 @@ int ObDDLResolver::normalize_ai_column_expr(const share::schema::ObColumnSchemaV
             }
             if (is_dep_ai) {
               ret = OB_NOT_SUPPORTED;
-              LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI column depending on another AI column");
             }
           }
         }

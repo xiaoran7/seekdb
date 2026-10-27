@@ -148,19 +148,49 @@ bool is_bool_text(const char *ptr, const int64_t len)
          (5 == len && 0 == strncasecmp(ptr, "false", 5));
 }
 
-// Accepts both `YYYY-MM-DD` and the ISO `YYYY-MM-DDTHH:MM:SS` spelling that
-// appears in the file_sql fixtures.
+// Accepts both `YYYY-MM-DD` and checks date component validity
 bool is_date_text(const char *ptr, const int64_t len)
 {
-  return 10 == len && ptr[4] == '-' && ptr[7] == '-';
+  bool ok = (10 == len && ptr[4] == '-' && ptr[7] == '-');
+  if (ok) {
+    for (int i = 0; ok && i < 10; ++i) {
+      if (i == 4 || i == 7) continue;
+      if (ptr[i] < '0' || ptr[i] > '9') ok = false;
+    }
+  }
+  if (ok) {
+    const int month = (ptr[5] - '0') * 10 + (ptr[6] - '0');
+    const int day = (ptr[8] - '0') * 10 + (ptr[9] - '0');
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+      ok = false;
+    }
+  }
+  return ok;
 }
 
 bool is_datetime_text(const char *ptr, const int64_t len)
 {
-  bool ans = (len >= 19) && ptr[4] == '-' && ptr[7] == '-' &&
+  bool ok = (len >= 19 && ptr[4] == '-' && ptr[7] == '-' &&
              ('T' == ptr[10] || ' ' == ptr[10]) &&
-             ptr[13] == ':' && ptr[16] == ':';
-  return ans;
+             ptr[13] == ':' && ptr[16] == ':');
+  if (ok) {
+    for (int i = 0; ok && i < 19; ++i) {
+      if (i == 4 || i == 7 || i == 10 || i == 13 || i == 16) continue;
+      if (ptr[i] < '0' || ptr[i] > '9') ok = false;
+    }
+  }
+  if (ok) {
+    const int month = (ptr[5] - '0') * 10 + (ptr[6] - '0');
+    const int day = (ptr[8] - '0') * 10 + (ptr[9] - '0');
+    const int hour = (ptr[11] - '0') * 10 + (ptr[12] - '0');
+    const int min = (ptr[14] - '0') * 10 + (ptr[15] - '0');
+    const int sec = (ptr[17] - '0') * 10 + (ptr[18] - '0');
+    if (month < 1 || month > 12 || day < 1 || day > 31 ||
+        hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 59) {
+      ok = false;
+    }
+  }
+  return ok;
 }
 
 // The inference ladder, widest last. A column takes the narrowest type that
@@ -176,25 +206,12 @@ ObExprResType infer_type_from_text(const char *ptr, const int64_t len)
     type.set_type(ObIntType);
   } else if (is_double_text(ptr, len)) {
     type.set_type(ObDoubleType);
-  } else if (is_date_text(ptr, len)) {
-    type.set_type(ObDateType);
   } else if (is_datetime_text(ptr, len)) {
     type.set_type(ObDateTimeType);
+  } else if (is_date_text(ptr, len)) {
+    type.set_type(ObDateType);
   }
   return type;
-}
-
-int type_rank(const ObObjType type)
-{
-  switch (type) {
-    case ObTinyIntType: return 1;   // boolean
-    case ObIntType: return 2;
-    case ObDoubleType: return 3;
-    case ObDateType: return 4;
-    case ObDateTimeType: return 5;
-    case ObVarcharType: return 6;
-    default: return 6;
-  }
 }
 
 ObExprResType merge_type(const ObExprResType &lhs, const ObExprResType &rhs)
@@ -204,15 +221,25 @@ ObExprResType merge_type(const ObExprResType &lhs, const ObExprResType &rhs)
   const ObObjType rt = rhs.get_type();
   if (lt == rt) {
     ans = lhs;
-  } else if (type_rank(lt) >= type_rank(rt)) {
-    ans = lhs;
-  } else {
+  } else if (ObNullType == lt) {
     ans = rhs;
-  }
-  // BOOLEAN widened by a number becomes that number; BOOLEAN widened by
-  // anything else degrades to text.
-  if ((ObTinyIntType == lt || ObTinyIntType == rt) &&
-      ans.get_type() != ObTinyIntType && type_rank(ans.get_type()) > 3) {
+  } else if (ObNullType == rt) {
+    ans = lhs;
+  } else if (ObVarcharType == lt || ObVarcharType == rt) {
+    ans.set_type(ObVarcharType);
+  } else if ((ObTinyIntType == lt && ObIntType == rt) ||
+             (ObIntType == lt && ObTinyIntType == rt)) {
+    ans.set_type(ObIntType);
+  } else if ((ObTinyIntType == lt || ObIntType == lt) && ObDoubleType == rt) {
+    ans.set_type(ObDoubleType);
+  } else if (ObDoubleType == lt && (ObTinyIntType == rt || ObIntType == rt)) {
+    ans.set_type(ObDoubleType);
+  } else if (ObDateType == lt && ObDateTimeType == rt) {
+    ans.set_type(ObDateTimeType);
+  } else if (ObDateTimeType == lt && ObDateType == rt) {
+    ans.set_type(ObDateTimeType);
+  } else {
+    // Incompatible types degrade safely to VARCHAR
     ans.set_type(ObVarcharType);
   }
   if (ObVarcharType == ans.get_type()) {
@@ -486,8 +513,128 @@ private:
   int depth_ = 0;
 };
 
-// The subset of Parquet metadata the reader needs: the leaf columns with their
-// physical type, and the byte ranges of each column chunk's data pages.
+// Raw Snappy block decompressor for compressed Parquet pages.
+int snappy_decompress(const char *src, const int64_t src_len,
+                      char *dst, const int64_t dst_len, int64_t &actual_out_len)
+{
+  int ret = OB_SUCCESS;
+  int64_t src_pos = 0;
+  int64_t dst_pos = 0;
+  actual_out_len = 0;
+  uint64_t expected_len = 0;
+  int shift = 0;
+  while (src_pos < src_len) {
+    const uint8_t b = static_cast<uint8_t>(src[src_pos++]);
+    expected_len |= (static_cast<uint64_t>(b & 0x7f) << shift);
+    shift += 7;
+    if (0 == (b & 0x80)) {
+      break;
+    }
+    if (shift > 63) {
+      ret = OB_ERR_UNEXPECTED;
+      break;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (expected_len > static_cast<uint64_t>(dst_len)) {
+      ret = OB_SIZE_OVERFLOW;
+    } else {
+      while (OB_SUCC(ret) && src_pos < src_len && dst_pos < static_cast<int64_t>(expected_len)) {
+        const uint8_t tag_byte = static_cast<uint8_t>(src[src_pos++]);
+        const uint8_t tag = tag_byte & 0x03;
+        if (0 == tag) {
+          uint32_t lit_len = (tag_byte >> 2) + 1;
+          if (lit_len > 60) {
+            const uint32_t extra = lit_len - 60;
+            if (src_pos + extra > src_len) {
+              ret = OB_ERR_UNEXPECTED;
+              break;
+            }
+            lit_len = 0;
+            for (uint32_t i = 0; i < extra; ++i) {
+              lit_len |= (static_cast<uint32_t>(static_cast<uint8_t>(src[src_pos++])) << (8 * i));
+            }
+            lit_len += 1;
+          }
+          if (src_pos + lit_len > src_len || dst_pos + lit_len > dst_len) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          MEMCPY(dst + dst_pos, src + src_pos, lit_len);
+          src_pos += lit_len;
+          dst_pos += lit_len;
+        } else if (1 == tag) {
+          const uint32_t copy_len = ((tag_byte >> 2) & 0x07) + 4;
+          if (src_pos >= src_len) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          const uint32_t offset = (static_cast<uint32_t>(tag_byte >> 5) << 8) |
+                                  static_cast<uint8_t>(src[src_pos++]);
+          if (0 == offset || offset > static_cast<uint32_t>(dst_pos) || dst_pos + copy_len > dst_len) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          for (uint32_t i = 0; i < copy_len; ++i) {
+            dst[dst_pos] = dst[dst_pos - offset];
+            ++dst_pos;
+          }
+        } else if (2 == tag) {
+          const uint32_t copy_len = (tag_byte >> 2) + 1;
+          if (src_pos + 2 > src_len) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          const uint32_t offset = static_cast<uint32_t>(static_cast<uint8_t>(src[src_pos])) |
+                                 (static_cast<uint32_t>(static_cast<uint8_t>(src[src_pos + 1])) << 8);
+          src_pos += 2;
+          if (0 == offset || offset > static_cast<uint32_t>(dst_pos) || dst_pos + copy_len > dst_len) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          for (uint32_t i = 0; i < copy_len; ++i) {
+            dst[dst_pos] = dst[dst_pos - offset];
+            ++dst_pos;
+          }
+        } else {
+          const uint32_t copy_len = (tag_byte >> 2) + 1;
+          if (src_pos + 4 > src_len) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          const uint32_t offset = static_cast<uint32_t>(static_cast<uint8_t>(src[src_pos])) |
+                                 (static_cast<uint32_t>(static_cast<uint8_t>(src[src_pos + 1])) << 8) |
+                                 (static_cast<uint32_t>(static_cast<uint8_t>(src[src_pos + 2])) << 16) |
+                                 (static_cast<uint32_t>(static_cast<uint8_t>(src[src_pos + 3])) << 24);
+          src_pos += 4;
+          if (0 == offset || offset > static_cast<uint32_t>(dst_pos) || dst_pos + copy_len > dst_len) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          for (uint32_t i = 0; i < copy_len; ++i) {
+            dst[dst_pos] = dst[dst_pos - offset];
+            ++dst_pos;
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        actual_out_len = dst_pos;
+      }
+    }
+  }
+  return ret;
+}
+
+// Parquet schema metadata separated cleanly from row group data chunks.
+struct ParquetSchemaField
+{
+  ObString name_;
+  int32_t physical_type_ = 0;
+  int32_t type_length_ = 0;
+  int32_t converted_type_ = -1;
+  bool optional_ = false;
+};
+
 struct ParquetColumnChunk
 {
   int64_t file_offset_ = 0;
@@ -496,14 +643,17 @@ struct ParquetColumnChunk
   int64_t num_values_ = 0;
 };
 
-struct ParquetColumn
+struct ParquetRowGroup
 {
-  ObString name_;
-  int32_t physical_type_ = 0;
-  int32_t type_length_ = 0;
-  int32_t converted_type_ = 0;
-  bool optional_ = false;
-  ParquetColumnChunk chunk_;
+  int64_t num_rows_ = 0;
+  common::ObSEArray<ParquetColumnChunk, 8> chunks_;
+};
+
+struct ParquetFile
+{
+  common::ObSEArray<ParquetSchemaField, 8> fields_;
+  common::ObSEArray<ParquetRowGroup, 8> row_groups_;
+  int64_t total_rows_ = 0;
 };
 
 const int32_t PARQUET_TYPE_BOOLEAN = 0;
@@ -516,13 +666,8 @@ const int32_t PARQUET_TYPE_BYTE_ARRAY = 6;
 const int32_t PARQUET_TYPE_FIXED_LEN_BYTE_ARRAY = 7;
 
 const int32_t PARQUET_CODEC_UNCOMPRESSED = 0;
+const int32_t PARQUET_CODEC_SNAPPY = 1;
 
-// FileMetaData { 1: i32 version, 2: list<SchemaElement> schema, 3: i64 num_rows,
-//                4: list<RowGroup> row_groups, ... }
-//
-// Only the pieces the reader consumes are decoded; every other field is skipped
-// through its wire type, so the parser tolerates the statistics and key-value
-// metadata that real writers emit.
 int parse_parquet_schema_element(ThriftCompactReader &reader,
                                  ObIAllocator &allocator,
                                  ObIArray<ObString> &names,
@@ -533,8 +678,6 @@ int parse_parquet_schema_element(ThriftCompactReader &reader,
                                  ObIArray<int32_t> &num_children)
 {
   int ret = OB_SUCCESS;
-  // SchemaElement { 1: Type type, 2: i32 type_length, 3: FieldRepetitionType repetition_type,
-  //                 4: string name, 5: i32 num_children, 6: ConvertedType converted_type, ... }
   ObString name;
   int32_t type = -1;
   int32_t type_len = 0;
@@ -603,11 +746,7 @@ int parse_parquet_schema_element(ThriftCompactReader &reader,
   return ret;
 }
 
-// ColumnMetaData { 1: Type type, 2: list<Encoding> encodings, 3: list<string> path_in_schema,
-//                  4: CompressionCodec codec, 5: i64 num_values,
-//                  6: i64 total_uncompressed_size, 7: i64 total_compressed_size,
-//                  9: i64 data_page_offset, ... }
-int parse_parquet_column_metadata(ThriftCompactReader &reader, ParquetColumn &column)
+int parse_parquet_column_metadata(ThriftCompactReader &reader, ParquetColumnChunk &chunk)
 {
   int ret = OB_SUCCESS;
   reader.enter();
@@ -619,25 +758,25 @@ int parse_parquet_column_metadata(ThriftCompactReader &reader, ParquetColumn &co
       int64_t v = 0;
       if (OB_FAIL(reader.read_zigzag(v))) {
       } else {
-        column.chunk_.codec_ = static_cast<int32_t>(v);
+        chunk.codec_ = static_cast<int32_t>(v);
       }
     } else if (5 == field_id && 6 == t) {
       int64_t v = 0;
       if (OB_FAIL(reader.read_zigzag(v))) {
       } else {
-        column.chunk_.num_values_ = v;
+        chunk.num_values_ = v;
       }
     } else if (7 == field_id && 6 == t) {
       int64_t v = 0;
       if (OB_FAIL(reader.read_zigzag(v))) {
       } else {
-        column.chunk_.total_compressed_size_ = v;
+        chunk.total_compressed_size_ = v;
       }
     } else if (9 == field_id && 6 == t) {
       int64_t v = 0;
       if (OB_FAIL(reader.read_zigzag(v))) {
       } else {
-        column.chunk_.file_offset_ = v;
+        chunk.file_offset_ = v;
       }
     } else if (OB_FAIL(reader.skip(static_cast<uint8_t>(t)))) {
     }
@@ -653,8 +792,7 @@ int parse_parquet_column_metadata(ThriftCompactReader &reader, ParquetColumn &co
   return ret;
 }
 
-// ColumnChunk { 1: string file_path, 2: i64 file_offset, 3: ColumnMetaData meta_data, ... }
-int parse_parquet_column_chunk(ThriftCompactReader &reader, ParquetColumn &column)
+int parse_parquet_column_chunk(ThriftCompactReader &reader, ParquetColumnChunk &chunk)
 {
   int ret = OB_SUCCESS;
   reader.enter();
@@ -666,10 +804,10 @@ int parse_parquet_column_chunk(ThriftCompactReader &reader, ParquetColumn &colum
       int64_t v = 0;
       if (OB_FAIL(reader.read_zigzag(v))) {
       } else {
-        column.chunk_.file_offset_ = v;
+        chunk.file_offset_ = v;
       }
     } else if (3 == field_id && 12 == t) {
-      if (OB_FAIL(parse_parquet_column_metadata(reader, column))) {
+      if (OB_FAIL(parse_parquet_column_metadata(reader, chunk))) {
       }
     } else if (OB_FAIL(reader.skip(static_cast<uint8_t>(t)))) {
     }
@@ -685,8 +823,7 @@ int parse_parquet_column_chunk(ThriftCompactReader &reader, ParquetColumn &colum
   return ret;
 }
 
-// RowGroup { 1: list<ColumnChunk> columns, 2: i64 total_byte_size, 3: i64 num_rows, ... }
-int parse_parquet_row_group(ThriftCompactReader &reader, ObIArray<ParquetColumn> &columns)
+int parse_parquet_row_group(ThriftCompactReader &reader, ParquetRowGroup &rg)
 {
   int ret = OB_SUCCESS;
   reader.enter();
@@ -702,11 +839,17 @@ int parse_parquet_row_group(ThriftCompactReader &reader, ObIArray<ParquetColumn>
         if (15 == n && OB_FAIL(reader.read_varint(n))) {
         }
         for (uint64_t i = 0; OB_SUCC(ret) && i < n; ++i) {
-          ParquetColumn column;
-          if (OB_FAIL(parse_parquet_column_chunk(reader, column))) {
-          } else if (OB_FAIL(columns.push_back(column))) {
+          ParquetColumnChunk chunk;
+          if (OB_FAIL(parse_parquet_column_chunk(reader, chunk))) {
+          } else if (OB_FAIL(rg.chunks_.push_back(chunk))) {
           }
         }
+      }
+    } else if (3 == field_id && 6 == t) {
+      int64_t v = 0;
+      if (OB_FAIL(reader.read_zigzag(v))) {
+      } else {
+        rg.num_rows_ = v;
       }
     } else if (OB_FAIL(reader.skip(static_cast<uint8_t>(t)))) {
     }
@@ -723,7 +866,7 @@ int parse_parquet_row_group(ThriftCompactReader &reader, ObIArray<ParquetColumn>
 }
 
 int parse_parquet_footer(ObIAllocator &allocator, const char *footer, const int64_t len,
-                         ObIArray<ParquetColumn> &columns, int64_t &num_rows)
+                         ParquetFile &pq_file)
 {
   int ret = OB_SUCCESS;
   ThriftCompactReader reader(footer, len);
@@ -757,7 +900,7 @@ int parse_parquet_footer(ObIAllocator &allocator, const char *footer, const int6
       int64_t v = 0;
       if (OB_FAIL(reader.read_zigzag(v))) {
       } else {
-        num_rows = v;
+        pq_file.total_rows_ = v;
       }
     } else if (4 == field_id && 9 == t) {
       uint8_t hdr = 0;
@@ -766,11 +909,10 @@ int parse_parquet_footer(ObIAllocator &allocator, const char *footer, const int6
         uint64_t n = hdr >> 4;
         if (15 == n && OB_FAIL(reader.read_varint(n))) {
         }
-        // Only the first row group is decoded: the fixtures written for the
-        // file SQL tests use a single group, and this keeps the reader's memory
-        // bounded regardless of the file's row count.
         for (uint64_t i = 0; OB_SUCC(ret) && i < n; ++i) {
-          if (OB_FAIL(parse_parquet_row_group(reader, columns))) {
+          ParquetRowGroup rg;
+          if (OB_FAIL(parse_parquet_row_group(reader, rg))) {
+          } else if (OB_FAIL(pq_file.row_groups_.push_back(rg))) {
           }
         }
       }
@@ -787,19 +929,15 @@ int parse_parquet_footer(ObIAllocator &allocator, const char *footer, const int6
   reader.leave();
   // Element 0 of the schema is the root group; only leaves carry data.
   if (OB_SUCC(ret)) {
-    int64_t leaf = 0;
     for (int64_t i = 1; OB_SUCC(ret) && i < schema_names.count(); ++i) {
       if (0 == schema_num_children.at(i)) {
-        if (leaf >= columns.count()) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("parquet schema has more leaves than row group chunks", K(ret));
-        } else {
-          columns.at(leaf).name_ = schema_names.at(i);
-          columns.at(leaf).physical_type_ = schema_types.at(i);
-          columns.at(leaf).type_length_ = schema_type_length.at(i);
-          columns.at(leaf).converted_type_ = schema_converted.at(i);
-          columns.at(leaf).optional_ = (1 == schema_repetition.at(i));
-          ++leaf;
+        ParquetSchemaField field;
+        field.name_ = schema_names.at(i);
+        field.physical_type_ = schema_types.at(i);
+        field.type_length_ = schema_type_length.at(i);
+        field.converted_type_ = schema_converted.at(i);
+        field.optional_ = (1 == schema_repetition.at(i));
+        if (OB_FAIL(pq_file.fields_.push_back(field))) {
         }
       }
     }
@@ -807,34 +945,41 @@ int parse_parquet_footer(ObIAllocator &allocator, const char *footer, const int6
   return ret;
 }
 
-int build_parquet_schema(ObFileTableSchema &schema, const ObIArray<ParquetColumn> &columns)
+int build_parquet_schema(ObFileTableSchema &schema, const ObIArray<ParquetSchemaField> &fields)
 {
   int ret = OB_SUCCESS;
-  for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
+  for (int64_t i = 0; OB_SUCC(ret) && i < fields.count(); ++i) {
+    const ParquetSchemaField &f = fields.at(i);
     ObFileTableColumn column;
-    column.name_ = columns.at(i).name_;
-    column.nullable_ = columns.at(i).optional_;
-    switch (columns.at(i).physical_type_) {
-      case PARQUET_TYPE_BOOLEAN:
-        column.type_.set_type(ObTinyIntType);
-        break;
-      case PARQUET_TYPE_INT32:
-      case PARQUET_TYPE_INT64:
-        column.type_.set_type(ObIntType);
-        break;
-      case PARQUET_TYPE_FLOAT:
-      case PARQUET_TYPE_DOUBLE:
-        column.type_.set_type(ObDoubleType);
-        break;
-      case PARQUET_TYPE_BYTE_ARRAY:
-      case PARQUET_TYPE_FIXED_LEN_BYTE_ARRAY:
-        column.type_.set_type(ObVarcharType);
-        column.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-        break;
-      default:
-        ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "parquet physical type");
-        break;
+    column.name_ = f.name_;
+    column.nullable_ = f.optional_;
+    if (6 == f.converted_type_) {
+      column.type_.set_type(ObDateType);
+    } else if (9 == f.converted_type_ || 10 == f.converted_type_) {
+      column.type_.set_type(ObDateTimeType);
+    } else {
+      switch (f.physical_type_) {
+        case PARQUET_TYPE_BOOLEAN:
+          column.type_.set_type(ObTinyIntType);
+          break;
+        case PARQUET_TYPE_INT32:
+        case PARQUET_TYPE_INT64:
+          column.type_.set_type(ObIntType);
+          break;
+        case PARQUET_TYPE_FLOAT:
+        case PARQUET_TYPE_DOUBLE:
+          column.type_.set_type(ObDoubleType);
+          break;
+        case PARQUET_TYPE_BYTE_ARRAY:
+        case PARQUET_TYPE_FIXED_LEN_BYTE_ARRAY:
+          column.type_.set_type(ObVarcharType);
+          column.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+          break;
+        default:
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "parquet physical type");
+          break;
+      }
     }
     if (OB_SUCC(ret)) {
       if (OB_FAIL(schema.columns().push_back(column))) {
@@ -902,13 +1047,13 @@ int parquet_decode_rle(const uint8_t *data, const int64_t len, const int64_t max
 }
 
 int decode_parquet_plain_page(ObIAllocator &allocator, const char *page, const int64_t len,
-                              const ParquetColumn &column, ObIArray<ObObjParam> &values)
+                              const ParquetSchemaField &field, const int64_t num_values,
+                              ObIArray<ObObjParam> &values)
 {
   int ret = OB_SUCCESS;
   int64_t pos = 0;
-  int64_t num_values = column.chunk_.num_values_;
   ObSEArray<bool, 16> defined;
-  if (column.optional_) {
+  if (field.optional_) {
     // Optional columns prefix the values with definition levels, encoded as a
     // 4-byte little-endian byte length followed by RLE/bit-packed data.
     if (pos + 4 > len) {
@@ -933,7 +1078,7 @@ int decode_parquet_plain_page(ObIAllocator &allocator, const char *page, const i
     // Required columns have every value present; the definition levels are only
     // consulted when the column is optional.
     for (int64_t i = 0; OB_SUCC(ret) && i < num_values; ++i) {
-      const bool present = !column.optional_ || (i < defined.count() && defined.at(i));
+      const bool present = !field.optional_ || (i < defined.count() && defined.at(i));
       if (!present) {
         ObObjParam null_obj;
         null_obj.set_null();
@@ -941,69 +1086,113 @@ int decode_parquet_plain_page(ObIAllocator &allocator, const char *page, const i
         }
       } else {
         ObObjParam obj;
-        switch (column.physical_type_) {
-          case PARQUET_TYPE_BOOLEAN: {
-            if (pos >= len) {
-              ret = OB_ERR_UNEXPECTED;
-            } else {
-              obj.set_tinyint((static_cast<uint8_t>(page[pos]) >> (i % 8)) & 0x01);
-              if (7 == i % 8) {
-                ++pos;
+        if (6 == field.converted_type_) {
+          if (pos + 4 > len) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            int32_t v = 0;
+            MEMCPY(&v, page + pos, 4);
+            obj.set_date(v);
+            pos += 4;
+          }
+        } else if (9 == field.converted_type_) {
+          if (pos + 8 > len) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            int64_t v = 0;
+            MEMCPY(&v, page + pos, 8);
+            obj.set_datetime(v * 1000);
+            pos += 8;
+          }
+        } else if (10 == field.converted_type_) {
+          if (pos + 8 > len) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            int64_t v = 0;
+            MEMCPY(&v, page + pos, 8);
+            obj.set_datetime(v);
+            pos += 8;
+          }
+        } else {
+          switch (field.physical_type_) {
+            case PARQUET_TYPE_BOOLEAN: {
+              if (pos >= len) {
+                ret = OB_ERR_UNEXPECTED;
+              } else {
+                obj.set_tinyint((static_cast<uint8_t>(page[pos]) >> (i % 8)) & 0x01);
+                if (7 == i % 8) {
+                  ++pos;
+                }
               }
+              break;
             }
-            break;
-          }
-          case PARQUET_TYPE_INT32: {
-            if (pos + 4 > len) {
-              ret = OB_ERR_UNEXPECTED;
-            } else {
-              int32_t v = 0;
-              MEMCPY(&v, page + pos, 4);
-              obj.set_int(v);
-              pos += 4;
+            case PARQUET_TYPE_INT32: {
+              if (pos + 4 > len) {
+                ret = OB_ERR_UNEXPECTED;
+              } else {
+                int32_t v = 0;
+                MEMCPY(&v, page + pos, 4);
+                obj.set_int(v);
+                pos += 4;
+              }
+              break;
             }
-            break;
-          }
-          case PARQUET_TYPE_INT64: {
-            if (pos + 8 > len) {
-              ret = OB_ERR_UNEXPECTED;
-            } else {
-              int64_t v = 0;
-              MEMCPY(&v, page + pos, 8);
-              obj.set_int(v);
-              pos += 8;
+            case PARQUET_TYPE_INT64: {
+              if (pos + 8 > len) {
+                ret = OB_ERR_UNEXPECTED;
+              } else {
+                int64_t v = 0;
+                MEMCPY(&v, page + pos, 8);
+                obj.set_int(v);
+                pos += 8;
+              }
+              break;
             }
-            break;
-          }
-          case PARQUET_TYPE_FLOAT: {
-            if (pos + 4 > len) {
-              ret = OB_ERR_UNEXPECTED;
-            } else {
-              float v = 0;
-              MEMCPY(&v, page + pos, 4);
-              obj.set_double(v);
-              pos += 4;
+            case PARQUET_TYPE_FLOAT: {
+              if (pos + 4 > len) {
+                ret = OB_ERR_UNEXPECTED;
+              } else {
+                float v = 0;
+                MEMCPY(&v, page + pos, 4);
+                obj.set_double(v);
+                pos += 4;
+              }
+              break;
             }
-            break;
-          }
-          case PARQUET_TYPE_DOUBLE: {
-            if (pos + 8 > len) {
-              ret = OB_ERR_UNEXPECTED;
-            } else {
-              double v = 0;
-              MEMCPY(&v, page + pos, 8);
-              obj.set_double(v);
-              pos += 8;
+            case PARQUET_TYPE_DOUBLE: {
+              if (pos + 8 > len) {
+                ret = OB_ERR_UNEXPECTED;
+              } else {
+                double v = 0;
+                MEMCPY(&v, page + pos, 8);
+                obj.set_double(v);
+                pos += 8;
+              }
+              break;
             }
-            break;
-          }
-          case PARQUET_TYPE_BYTE_ARRAY: {
-            if (pos + 4 > len) {
-              ret = OB_ERR_UNEXPECTED;
-            } else {
-              int32_t n = 0;
-              MEMCPY(&n, page + pos, 4);
-              pos += 4;
+            case PARQUET_TYPE_BYTE_ARRAY: {
+              if (pos + 4 > len) {
+                ret = OB_ERR_UNEXPECTED;
+              } else {
+                int32_t n = 0;
+                MEMCPY(&n, page + pos, 4);
+                pos += 4;
+                if (n < 0 || pos + n > len) {
+                  ret = OB_ERR_UNEXPECTED;
+                } else {
+                  ObString text;
+                  if (OB_FAIL(append_text_column(allocator, page + pos, n, text))) {
+                  } else {
+                    obj.set_varchar(text);
+                    obj.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+                    pos += n;
+                  }
+                }
+              }
+              break;
+            }
+            case PARQUET_TYPE_FIXED_LEN_BYTE_ARRAY: {
+              const int64_t n = field.type_length_;
               if (n < 0 || pos + n > len) {
                 ret = OB_ERR_UNEXPECTED;
               } else {
@@ -1011,31 +1200,16 @@ int decode_parquet_plain_page(ObIAllocator &allocator, const char *page, const i
                 if (OB_FAIL(append_text_column(allocator, page + pos, n, text))) {
                 } else {
                   obj.set_varchar(text);
-                  obj.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+                  obj.set_collation_type(CS_TYPE_BINARY);
                   pos += n;
                 }
               }
+              break;
             }
-            break;
+            default:
+              ret = OB_NOT_SUPPORTED;
+              break;
           }
-          case PARQUET_TYPE_FIXED_LEN_BYTE_ARRAY: {
-            const int64_t n = column.type_length_;
-            if (n < 0 || pos + n > len) {
-              ret = OB_ERR_UNEXPECTED;
-            } else {
-              ObString text;
-              if (OB_FAIL(append_text_column(allocator, page + pos, n, text))) {
-              } else {
-                obj.set_varchar(text);
-                obj.set_collation_type(CS_TYPE_BINARY);
-                pos += n;
-              }
-            }
-            break;
-          }
-          default:
-            ret = OB_NOT_SUPPORTED;
-            break;
         }
         if (OB_SUCC(ret)) {
           if (OB_FAIL(values.push_back(obj))) {
@@ -1048,21 +1222,22 @@ int decode_parquet_plain_page(ObIAllocator &allocator, const char *page, const i
 }
 
 int decode_parquet_column(ObIAllocator &allocator, const char *data, const int64_t len,
-                          const ParquetColumn &column, ObIArray<ObObjParam> &values)
+                          const ParquetSchemaField &field,
+                          const ParquetColumnChunk &chunk,
+                          ObIArray<ObObjParam> &values)
 {
   int ret = OB_SUCCESS;
-  if (PARQUET_CODEC_UNCOMPRESSED != column.chunk_.codec_) {
+  if (PARQUET_CODEC_UNCOMPRESSED != chunk.codec_ && PARQUET_CODEC_SNAPPY != chunk.codec_) {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "compressed parquet column");
-  } else if (column.chunk_.file_offset_ < 0 || column.chunk_.file_offset_ >= len) {
+  } else if (chunk.file_offset_ < 0 || chunk.file_offset_ >= len) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("parquet column offset out of range", K(ret), K(column.chunk_.file_offset_));
+    LOG_WARN("parquet column offset out of range", K(ret), K(chunk.file_offset_));
   } else {
-    // PageHeader { 1: PageType type, 2: i32 uncompressed_page_size,
-    //              3: i32 compressed_page_size, 5: DataPageHeader data_page_header, ... }
-    ThriftCompactReader reader(data + column.chunk_.file_offset_,
-                               len - column.chunk_.file_offset_);
+    ThriftCompactReader reader(data + chunk.file_offset_,
+                               len - chunk.file_offset_);
     int32_t page_type = -1;
+    int32_t uncompressed_size = 0;
     int32_t compressed_size = 0;
     reader.enter();
     int t = reader.next_field_type();
@@ -1074,6 +1249,12 @@ int decode_parquet_column(ObIAllocator &allocator, const char *data, const int64
         if (OB_FAIL(reader.read_zigzag(v))) {
         } else {
           page_type = static_cast<int32_t>(v);
+        }
+      } else if (2 == field_id && 5 == t) {
+        int64_t v = 0;
+        if (OB_FAIL(reader.read_zigzag(v))) {
+        } else {
+          uncompressed_size = static_cast<int32_t>(v);
         }
       } else if (3 == field_id && 5 == t) {
         int64_t v = 0;
@@ -1092,15 +1273,28 @@ int decode_parquet_column(ObIAllocator &allocator, const char *data, const int64
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("truncated parquet page header", K(ret));
     }
-    const int64_t page_start = column.chunk_.file_offset_ + reader.pos();
+    const int64_t page_start = chunk.file_offset_ + reader.pos();
     if (OB_SUCC(ret)) {
       if (0 != page_type) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "non-data parquet page");
       } else if (page_start + compressed_size > len) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(decode_parquet_plain_page(allocator, data + page_start,
-                                                   compressed_size, column, values))) {
+      } else if (PARQUET_CODEC_UNCOMPRESSED == chunk.codec_) {
+        if (OB_FAIL(decode_parquet_plain_page(allocator, data + page_start,
+                                             compressed_size, field, chunk.num_values_, values))) {
+        }
+      } else if (PARQUET_CODEC_SNAPPY == chunk.codec_) {
+        char *uncomp_buf = static_cast<char *>(allocator.alloc(uncompressed_size + 1));
+        int64_t actual_out = 0;
+        if (OB_ISNULL(uncomp_buf)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else if (OB_FAIL(snappy_decompress(data + page_start, compressed_size,
+                                             uncomp_buf, uncompressed_size, actual_out))) {
+          LOG_WARN("snappy decompress failed", K(ret));
+        } else if (OB_FAIL(decode_parquet_plain_page(allocator, uncomp_buf,
+                                                     actual_out, field, chunk.num_values_, values))) {
+        }
       }
     }
   }
@@ -1108,41 +1302,53 @@ int decode_parquet_column(ObIAllocator &allocator, const char *data, const int64
 }
 
 int read_parquet_rows(ObIAllocator &allocator, const char *data, const int64_t len,
-                      const ObIArray<ParquetColumn> &columns, const int64_t num_rows,
+                      const ParquetFile &pq_file,
                       ObIArray<ObObjParam> &objs, int64_t &row_cnt)
 {
   int ret = OB_SUCCESS;
   row_cnt = 0;
-  // Parquet stores values column-major while the executor consumes rows, so each
-  // column is decoded into its own array first and the rows are then interleaved.
-  ObSEArray<ObSEArray<ObObjParam, 16> *, 8> values;
-  for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
-    void *buf = allocator.alloc(sizeof(ObSEArray<ObObjParam, 16>));
-    if (OB_ISNULL(buf)) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-      LOG_WARN("allocate column values failed", K(ret));
-    } else {
-      ObSEArray<ObObjParam, 16> *column_values = new (buf) ObSEArray<ObObjParam, 16>();
-      if (OB_FAIL(values.push_back(column_values))) {
-      } else if (OB_FAIL(decode_parquet_column(allocator, data, len, columns.at(i),
-                                               *column_values))) {
+  for (int64_t g = 0; OB_SUCC(ret) && g < pq_file.row_groups_.count(); ++g) {
+    const ParquetRowGroup &rg = pq_file.row_groups_.at(g);
+    if (rg.chunks_.count() < pq_file.fields_.count()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("parquet row group has fewer chunks than schema fields", K(ret), K(g));
+      break;
+    }
+    ObSEArray<ObSEArray<ObObjParam, 16> *, 8> col_values;
+    int64_t actual_rows = rg.num_rows_;
+    for (int64_t c = 0; OB_SUCC(ret) && c < pq_file.fields_.count(); ++c) {
+      void *buf = allocator.alloc(sizeof(ObSEArray<ObObjParam, 16>));
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("allocate column values failed", K(ret));
+      } else {
+        ObSEArray<ObObjParam, 16> *vals = new (buf) ObSEArray<ObObjParam, 16>();
+        if (OB_FAIL(col_values.push_back(vals))) {
+        } else if (OB_FAIL(decode_parquet_column(allocator, data, len,
+                                                 pq_file.fields_.at(c),
+                                                 rg.chunks_.at(c),
+                                                 *vals))) {
+        } else if (0 == c && vals->count() > 0) {
+          actual_rows = vals->count();
+        }
       }
     }
-  }
-  if (OB_SUCC(ret)) {
-    int64_t rows = num_rows;
-    for (int64_t i = 0; OB_SUCC(ret) && i < values.count(); ++i) {
-      if (values.at(i)->count() < rows) {
-        rows = values.at(i)->count();
-      }
-    }
-    for (int64_t r = 0; OB_SUCC(ret) && r < rows; ++r) {
-      for (int64_t c = 0; OB_SUCC(ret) && c < values.count(); ++c) {
-        if (OB_FAIL(objs.push_back(values.at(c)->at(r)))) {
+    if (OB_SUCC(ret)) {
+      for (int64_t r = 0; OB_SUCC(ret) && r < actual_rows; ++r) {
+        for (int64_t c = 0; OB_SUCC(ret) && c < pq_file.fields_.count(); ++c) {
+          if (r < col_values.at(c)->count()) {
+            if (OB_FAIL(objs.push_back(col_values.at(c)->at(r)))) {
+            }
+          } else {
+            ObObjParam null_obj;
+            null_obj.set_null();
+            if (OB_FAIL(objs.push_back(null_obj))) {
+            }
+          }
         }
       }
       if (OB_SUCC(ret)) {
-        ++row_cnt;
+        row_cnt += actual_rows;
       }
     }
   }
@@ -1296,18 +1502,27 @@ int ObFileTableReader::read_one_file(const ObString &path,
   MEMCPY(path_buf, path.ptr(), path.length());
   path_buf[path.length()] = '\0';
   if (OB_FAIL(read_whole_file(allocator_, path_buf, data, len))) {
-  } else if (FILE_TABLE_FORMAT_CSV == options_.format_) {
-    if (OB_FAIL(read_csv(data, len, objs, row_cnt))) {
-    }
-  } else if (FILE_TABLE_FORMAT_PARQUET == options_.format_) {
-    if (OB_FAIL(read_parquet(data, len, objs, row_cnt))) {
-    }
   } else {
-    const bool newline_delimited =
-        (FILE_TABLE_FORMAT_NDJSON == options_.format_) || options_.header_ == false ||
-        (FILE_TABLE_FORMAT_JSON == options_.format_ && NULL != strchr(data, '\n') &&
-         NULL == strstr(data, "\"columns\""));
-    if (OB_FAIL(read_json(data, len, newline_delimited, objs, row_cnt))) {
+    // Skip UTF-8 BOM if present
+    if (len >= 3 && static_cast<uint8_t>(data[0]) == 0xEF &&
+                    static_cast<uint8_t>(data[1]) == 0xBB &&
+                    static_cast<uint8_t>(data[2]) == 0xBF) {
+      data += 3;
+      len -= 3;
+    }
+    if (FILE_TABLE_FORMAT_CSV == options_.format_) {
+      if (OB_FAIL(read_csv(data, len, objs, row_cnt))) {
+      }
+    } else if (FILE_TABLE_FORMAT_PARQUET == options_.format_) {
+      if (OB_FAIL(read_parquet(data, len, objs, row_cnt))) {
+      }
+    } else {
+      const bool newline_delimited =
+          (FILE_TABLE_FORMAT_NDJSON == options_.format_) || options_.header_ == false ||
+          (FILE_TABLE_FORMAT_JSON == options_.format_ && NULL != strchr(data, '\n') &&
+           NULL == strstr(data, "\"columns\""));
+      if (OB_FAIL(read_json(data, len, newline_delimited, objs, row_cnt))) {
+      }
     }
   }
   return ret;
@@ -1334,6 +1549,7 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
       field.len_ = 0;
       field.is_null_ = false;
       bool in_quote = false;
+      bool was_quoted = false;
       char *scratch = static_cast<char *>(row_allocator.alloc(len - pos + 1));
       int64_t out = 0;
       if (OB_ISNULL(scratch)) {
@@ -1360,6 +1576,7 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
           }
         } else if (c == options_.quote_) {
           in_quote = true;
+          was_quoted = true;
           ++pos;
         } else if (c == options_.field_delimiter_) {
           ++pos;
@@ -1378,8 +1595,9 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
       }
       field.ptr_ = scratch;
       field.len_ = out;
-      field.is_null_ = (NULL != nullstr.ptr() &&
-                        0 == nullstr.compare(ObString(static_cast<int32_t>(out), scratch)));
+      field.is_null_ = (!was_quoted && 0 == out) ||
+                        (NULL != nullstr.ptr() &&
+                         0 == nullstr.compare(ObString(static_cast<int32_t>(out), scratch)));
       if (OB_FAIL(fields.push_back(field))) {
       } else if (pos >= len) {
         end_of_file = true;
@@ -1407,12 +1625,11 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
       first_row = false;
     } else {
       if (first_row) {
-        // No header: name the columns column_0, column_1, ... the way the
-        // values table does.
+        // No header: name the columns column0, column1, ... the way DuckDB does.
         for (int64_t i = 0; OB_SUCC(ret) && i < fields.count(); ++i) {
           ObFileTableColumn column;
           ObSqlString name;
-          if (OB_FAIL(name.append_fmt("column_%ld", i))) {
+          if (OB_FAIL(name.append_fmt("column%ld", i))) {
           } else if (OB_FAIL(append_text_column(allocator_, name.ptr(), name.length(),
                                                 column.name_))) {
           } else {
@@ -1477,6 +1694,7 @@ int ObFileTableReader::read_csv(const char *data, const int64_t len,
         field.len_ = 0;
         field.is_null_ = false;
         bool in_quote = false;
+        bool was_quoted = false;
         char *scratch = static_cast<char *>(row_allocator.alloc(len - pos + 1));
         int64_t out = 0;
         if (OB_ISNULL(scratch)) {
@@ -1503,6 +1721,7 @@ int ObFileTableReader::read_csv(const char *data, const int64_t len,
             }
           } else if (c == options_.quote_) {
             in_quote = true;
+            was_quoted = true;
             ++pos;
           } else if (c == options_.field_delimiter_) {
             ++pos;
@@ -1521,9 +1740,10 @@ int ObFileTableReader::read_csv(const char *data, const int64_t len,
         }
         field.ptr_ = scratch;
         field.len_ = out;
-        field.is_null_ = (NULL != options_.nullstr_.ptr() &&
-                          0 == options_.nullstr_.compare(
-                              ObString(static_cast<int32_t>(out), scratch)));
+        field.is_null_ = (!was_quoted && 0 == out) ||
+                          (NULL != options_.nullstr_.ptr() &&
+                           0 == options_.nullstr_.compare(
+                               ObString(static_cast<int32_t>(out), scratch)));
         if (OB_FAIL(fields.push_back(field))) {
         } else if (pos >= len) {
           end_of_file = true;
@@ -1796,19 +2016,16 @@ int ObFileTableReader::read_parquet(const char *data, const int64_t len,
         (static_cast<int64_t>(static_cast<uint8_t>(data[len - 6])) << 16) |
         (static_cast<int64_t>(static_cast<uint8_t>(data[len - 5])) << 24);
     const int64_t footer_start = len - 8 - footer_len;
-    ObSEArray<ParquetColumn, 8> columns;
-    int64_t num_rows = 0;
+    ParquetFile pq_file;
     if (footer_len <= 0 || footer_start < 4) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("invalid parquet footer", K(ret), K(footer_len), K(footer_start));
-    } else if (OB_FAIL(parse_parquet_footer(allocator_, data + footer_start, footer_len,
-                                            columns, num_rows))) {
-    } else if (0 == columns.count()) {
+    } else if (OB_FAIL(parse_parquet_footer(allocator_, data + footer_start, footer_len, pq_file))) {
+    } else if (0 == pq_file.fields_.count()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("parquet file has no columns", K(ret));
-    } else if (OB_FAIL(build_parquet_schema(schema_, columns))) {
-    } else if (OB_FAIL(read_parquet_rows(allocator_, data, len, columns,
-                                         num_rows, objs, row_cnt))) {
+    } else if (OB_FAIL(build_parquet_schema(schema_, pq_file.fields_))) {
+    } else if (OB_FAIL(read_parquet_rows(allocator_, data, len, pq_file, objs, row_cnt))) {
     }
   }
   return ret;
@@ -1900,8 +2117,14 @@ int ObFileTableReader::append_value(common::ObIArray<common::ObObjParam> &objs,
     case ObDateTimeType: {
       ObTimeConvertCtx cvrt_ctx(NULL, false);
       int64_t datetime = 0;
+      char dt_buf[64] = {0};
+      const int64_t copy_len = len < 63 ? len : 63;
+      MEMCPY(dt_buf, ptr, copy_len);
+      if (copy_len >= 11 && dt_buf[10] == 'T') {
+        dt_buf[10] = ' ';
+      }
       if (OB_FAIL(ObTimeConverter::str_to_datetime(
-                    ObString(static_cast<int32_t>(len), ptr), cvrt_ctx, datetime))) {
+                    ObString(static_cast<int32_t>(copy_len), dt_buf), cvrt_ctx, datetime))) {
         LOG_WARN("convert datetime failed", K(ret));
       } else {
         obj.set_datetime(datetime);

@@ -592,7 +592,7 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         case T_RETRY_AI_COLUMN: {
             if (node.num_child_ > 1) {
               ret = OB_NOT_SUPPORTED;
-              LOG_USER_ERROR(OB_NOT_SUPPORTED, "retry ai column mixed with other alter actions");
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
             } else if (OB_ISNULL(action_node->children_[0])) {
               ret = OB_ERR_UNEXPECTED;
             } else {
@@ -605,7 +605,7 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
               const ObColumnSchemaV2 *state_col = table_schema_->get_column_schema(state_col_name);
               if (OB_ISNULL(state_col)) {
                 ret = OB_NOT_SUPPORTED;
-                LOG_USER_ERROR(OB_NOT_SUPPORTED, "retry ai column on non-ai column");
+                LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
               } else {
                 alter_table_stmt->set_is_retry_ai_column(true);
                 alter_table_stmt->set_retry_ai_col_name(col_name);

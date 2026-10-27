@@ -34,7 +34,8 @@ enum ObAiColumnTaskState
   AI_COLUMN_TASK_PENDING = 0,   // waiting for a worker lease
   AI_COLUMN_TASK_RUNNING = 1,   // leased by a worker; a stale lease is reclaimable
   AI_COLUMN_TASK_READY = 2,     // the model call succeeded; the result is applied
-  AI_COLUMN_TASK_FAILED = 3,    // the last attempt failed; may still be retried
+  AI_COLUMN_TASK_FAILED = 3,    // the last attempt failed; may still be retried / terminal failure in table
+  AI_COLUMN_TASK_TERMINAL_FAILED = 4, // task in __all_ai_column_task marked terminal failed waiting for group visibility
 };
 
 // `sync_mode` is accepted for compatibility with the declared syntax; the

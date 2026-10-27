@@ -2004,7 +2004,7 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
               }
               int64_t count = 0;
               if (OB_FAIL(check_sql.assign_fmt(
-                      "SELECT COUNT(*) AS cnt FROM `%.*s`.`%.*s` WHERE `%.*s` != %d",
+                      "SELECT COUNT(*) AS cnt FROM `%.*s`.`%.*s` WHERE IFNULL(`%.*s`, 0) != %d",
                       db_name.length(),
                       db_name.ptr(),
                       table_schema->get_table_name_str().length(),
@@ -12940,8 +12940,26 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableIte
     } else if (OB_FAIL(resolve_file_table_options(*table_node.children_[1], options, path))) {
     } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, path))) {
       LOG_WARN("file path is not allowed by secure_file_priv", K(ret), K(path));
-    } else if (OB_ISNULL(new_table_item = dml_stmt->create_table_item(*allocator_))) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      bool has_path_traversal = false;
+      for (int64_t i = 0; i < path.length() - 1; ++i) {
+        if (path[i] == '.' && path[i + 1] == '.') {
+          const bool left_boundary = (i == 0 || path[i - 1] == '/' || path[i - 1] == '\\');
+          const bool right_boundary = (i + 2 == path.length() || path[i + 2] == '/' || path[i + 2] == '\\');
+          if (left_boundary && right_boundary) {
+            has_path_traversal = true;
+            break;
+          }
+        }
+      }
+      if (has_path_traversal) {
+        ret = OB_ERR_NO_PRIVILEGE;
+        LOG_USER_ERROR(OB_ERR_NO_PRIVILEGE, "path traversal is not allowed in file SQL functions");
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(new_table_item = dml_stmt->create_table_item(*allocator_))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
     } else {
       ObString table_name;
       if (NULL != alias_node) {
@@ -13008,6 +13026,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableIte
       }
     }
   }
+}
   return ret;
 }
 
@@ -13045,18 +13064,41 @@ int ObDMLResolver::gen_file_table_column_items(const ObFileTableSchema &schema, 
   return ret;
 }
 
+static void flatten_file_table_args(const ParseNode *node, common::ObIArray<const ParseNode *> &args)
+{
+  if (OB_ISNULL(node)) {
+    // do nothing
+  } else if (T_LINK_NODE == node->type_) {
+    if (node->num_child_ >= 2) {
+      flatten_file_table_args(node->children_[0], args);
+      flatten_file_table_args(node->children_[1], args);
+    }
+  } else if (T_EXPR_LIST == node->type_) {
+    if (node->children_ != NULL) {
+      for (int64_t i = 0; i < node->num_child_; ++i) {
+        flatten_file_table_args(node->children_[i], args);
+      }
+    }
+  } else {
+    args.push_back(node);
+  }
+}
+
 int ObDMLResolver::resolve_file_table_options(const ParseNode &args_node,
                                               ObFileTableOptions &options,
                                               ObString &path)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(params_.expr_factory_) || OB_UNLIKELY(!args_node.children_)) {
+  if (OB_ISNULL(params_.expr_factory_)) {
     ret = OB_ERR_UNEXPECTED;
   } else {
-    const ParseNode *arg_node = args_node.children_[0];
-    if (OB_ISNULL(arg_node)) {
-      ret = OB_ERR_UNEXPECTED;
+    common::ObSEArray<const ParseNode *, 8> args;
+    flatten_file_table_args(&args_node, args);
+    if (args.empty() || OB_ISNULL(args.at(0))) {
+      ret = OB_ERR_PARSER_SYNTAX;
+      LOG_USER_ERROR(OB_ERR_PARSER_SYNTAX);
     } else {
+      const ParseNode *arg_node = args.at(0);
       ObRawExpr *expr = NULL;
       if (OB_FAIL(resolve_sql_expr(*arg_node, expr))) {
       } else if (OB_ISNULL(expr) || !expr->is_const_raw_expr() ||
@@ -13070,8 +13112,8 @@ int ObDMLResolver::resolve_file_table_options(const ParseNode &args_node,
       }
     }
     // Named arguments: sample_size = N, format = 'x', header = true, ...
-    for (int64_t i = 1; OB_SUCC(ret) && i < args_node.num_child_; ++i) {
-      const ParseNode *named_node = args_node.children_[i];
+    for (int64_t i = 1; OB_SUCC(ret) && i < args.count(); ++i) {
+      const ParseNode *named_node = args.at(i);
       if (OB_ISNULL(named_node) || OB_UNLIKELY(T_NAMED_ARG != named_node->type_) ||
           2 != named_node->num_child_ || OB_ISNULL(named_node->children_[0]) ||
           OB_ISNULL(named_node->children_[1])) {
@@ -13093,23 +13135,46 @@ int ObDMLResolver::resolve_file_table_options(const ParseNode &args_node,
               LOG_USER_ERROR(OB_NOT_SUPPORTED, "sample_size > 0 in file table functions");
             }
           } else if (0 == arg_name.case_compare("header")) {
-            options.header_ = (0 != value.get_int());
-          } else if (0 == arg_name.case_compare("skip_header")) {
+            if (value.is_string_type()) {
+              options.header_ = (0 == value.get_varchar().case_compare("true") ||
+                                 0 == value.get_varchar().case_compare("1"));
+            } else {
+              options.header_ = (0 != value.get_int());
+            }
+          } else if (0 == arg_name.case_compare("skip_header") ||
+                     0 == arg_name.case_compare("skip")) {
             options.skip_header_ = value.get_int();
-          } else if (0 == arg_name.case_compare("field_delimiter")) {
+          } else if (0 == arg_name.case_compare("field_delimiter") ||
+                     0 == arg_name.case_compare("delim") ||
+                     0 == arg_name.case_compare("delimiter") ||
+                     0 == arg_name.case_compare("sep")) {
             options.field_delimiter_ = value.get_varchar().empty()
                 ? ',' : value.get_varchar().ptr()[0];
           } else if (0 == arg_name.case_compare("line_delimiter")) {
             options.line_delimiter_ = value.get_varchar().empty()
                 ? '\n' : value.get_varchar().ptr()[0];
-          } else if (0 == arg_name.case_compare("nullstr")) {
+          } else if (0 == arg_name.case_compare("quote") ||
+                     0 == arg_name.case_compare("quote_char")) {
+            options.quote_ = value.get_varchar().empty()
+                ? '"' : value.get_varchar().ptr()[0];
+          } else if (0 == arg_name.case_compare("escape") ||
+                     0 == arg_name.case_compare("escape_char")) {
+            options.escape_ = value.get_varchar().empty()
+                ? '\\' : value.get_varchar().ptr()[0];
+          } else if (0 == arg_name.case_compare("nullstr") ||
+                     0 == arg_name.case_compare("null_padding")) {
             options.nullstr_ = value.get_varchar();
           } else if (0 == arg_name.case_compare("format")) {
             const ObString fmt = value.get_varchar();
-            if (0 == fmt.case_compare("newline_delimited")) {
+            if (0 == fmt.case_compare("newline_delimited") ||
+                0 == fmt.case_compare("ndjson")) {
               options.format_ = FILE_TABLE_FORMAT_NDJSON;
+            } else if (0 == fmt.case_compare("json")) {
+              options.format_ = FILE_TABLE_FORMAT_JSON;
             } else if (0 == fmt.case_compare("csv")) {
               options.format_ = FILE_TABLE_FORMAT_CSV;
+            } else if (0 == fmt.case_compare("parquet")) {
+              options.format_ = FILE_TABLE_FORMAT_PARQUET;
             } else {
               ret = OB_ERR_PARSER_SYNTAX;
               LOG_USER_ERROR(OB_ERR_PARSER_SYNTAX);
