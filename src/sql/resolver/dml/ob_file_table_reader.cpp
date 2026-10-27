@@ -29,6 +29,7 @@
 #include "common/json_type/ob_json_parse.h"
 #include "common/json_type/ob_json_tree.h"
 #include "common/object/ob_object.h"
+#include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
 #include "lib/oblog/ob_log_module.h"
 #include "lib/utility/utility.h"
@@ -143,7 +144,7 @@ bool is_double_text(const char *ptr, const int64_t len)
 
 bool is_bool_text(const char *ptr, const int64_t len)
 {
-  return (5 == len && 0 == strncasecmp(ptr, "true", 5)) ||
+  return (4 == len && 0 == strncasecmp(ptr, "true", 4)) ||
          (5 == len && 0 == strncasecmp(ptr, "false", 5));
 }
 
@@ -1315,6 +1316,7 @@ int ObFileTableReader::read_one_file(const ObString &path,
 int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len)
 {
   int ret = OB_SUCCESS;
+  ObArenaAllocator row_allocator;
   ObSEArray<CsvField, 16> fields;
   bool first_row = true;
   int64_t pos = 0;
@@ -1323,6 +1325,7 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
     // Parse one physical row, honouring quoted fields that may contain the
     // field or line delimiter.
     fields.reuse();
+    row_allocator.reuse();
     bool end_of_row = false;
     bool end_of_file = (pos >= len);
     while (!end_of_row && !end_of_file) {
@@ -1331,7 +1334,7 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
       field.len_ = 0;
       field.is_null_ = false;
       bool in_quote = false;
-      char *scratch = static_cast<char *>(allocator_.alloc(len - pos + 1));
+      char *scratch = static_cast<char *>(row_allocator.alloc(len - pos + 1));
       int64_t out = 0;
       if (OB_ISNULL(scratch)) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -1451,11 +1454,13 @@ int ObFileTableReader::read_csv(const char *data, const int64_t len,
   } else {
     // Second pass: coerce every field to the inferred column type and append
     // the row.
+    ObArenaAllocator row_allocator;
     ObSEArray<CsvField, 16> fields;
     int64_t pos = 0;
     int64_t line_no = 0;
     while (OB_SUCC(ret) && pos < len) {
       fields.reuse();
+      row_allocator.reuse();
       bool end_of_row = false;
       bool end_of_file = false;
       while (!end_of_row && !end_of_file) {
@@ -1464,7 +1469,7 @@ int ObFileTableReader::read_csv(const char *data, const int64_t len,
         field.len_ = 0;
         field.is_null_ = false;
         bool in_quote = false;
-        char *scratch = static_cast<char *>(allocator_.alloc(len - pos + 1));
+        char *scratch = static_cast<char *>(row_allocator.alloc(len - pos + 1));
         int64_t out = 0;
         if (OB_ISNULL(scratch)) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -1735,6 +1740,11 @@ int ObFileTableReader::infer_schema_from_json(const char *data, const int64_t le
                 case ObJsonNodeType::J_DECIMAL:
                   cur.set_type(ObDoubleType);
                   break;
+                case ObJsonNodeType::J_OBJECT:
+                case ObJsonNodeType::J_ARRAY:
+                  ret = OB_NOT_SUPPORTED;
+                  LOG_USER_ERROR(OB_NOT_SUPPORTED, "nested json objects or arrays in file SQL");
+                  break;
                 default:
                   cur = infer_type_from_text(text, text_len);
                   break;
@@ -1821,6 +1831,10 @@ int ObFileTableReader::append_json_value(common::ObIArray<common::ObObjParam> &o
     if (OB_FAIL(append_value(objs, column, value.get_data(),
                              static_cast<int64_t>(value.get_data_length())))) {
     }
+  } else if (value.json_type() == ObJsonNodeType::J_OBJECT ||
+             value.json_type() == ObJsonNodeType::J_ARRAY) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "nested json objects or arrays in file SQL");
   } else {
     // Numbers that widened to text, or nested arrays/objects: keep their JSON
     // text so nothing is silently dropped.

@@ -513,7 +513,7 @@ END_P SET_VAR DELIMITER
 %type <node> column_list_with_boost with_param_column_ref
 %type <node> es_sql_opt
 %type <node> hybrid_search_expr hybrid_search_param
-%type <node> file_table_expr file_table_arg_list file_table_arg copy_stmt opt_copy_format
+%type <node> file_table_expr file_table_arg_list file_table_arg copy_stmt opt_copy_format copy_format_list copy_format_item
 %type <node> opt_ai_column_with ai_column_with_list ai_column_with_item
 %type <node> vector_similarity_expr vector_similarity_metric
 %type <node> algorithm_opt lock_opt
@@ -4435,6 +4435,54 @@ COPY '(' select_stmt ')' TO STRING_VALUE opt_copy_format
     }
   }
 }
+| COPY relation_factor TO STRING_VALUE opt_copy_format
+{
+  ParseNode *into_node = NULL;
+  ParseNode *format_node = NULL;
+  if (NULL != $5) {
+    malloc_non_terminal_node(format_node, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT, 1, $5);
+    if (OB_ISNULL(format_node)) {
+      yyerror(&@5, result, "No more space for malloc\n");
+      YYABORT_NO_MEMORY;
+    } else {
+      malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
+                               $4, format_node, NULL);
+    }
+  } else {
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
+                             $4, NULL, NULL);
+  }
+  if (OB_ISNULL(into_node)) {
+    yyerror(&@1, result, "No more space for malloc\n");
+    YYABORT_NO_MEMORY;
+  } else {
+    into_node->value_ = 1;
+    ParseNode *tbl_node = NULL;
+    malloc_non_terminal_node(tbl_node, result->malloc_pool_, T_ORG, 4, $2, NULL, NULL, NULL);
+    ParseNode *from_list = NULL;
+    merge_nodes(from_list, result, T_FROM_LIST, tbl_node);
+
+    ParseNode *star_node = NULL;
+    malloc_terminal_node(star_node, result->malloc_pool_, T_STAR);
+    ParseNode *upper_node = NULL;
+    malloc_non_terminal_node(upper_node, result->malloc_pool_, T_PROJECT_STRING, 1, star_node);
+    dup_string_to_node(upper_node, result->malloc_pool_, "*");
+    ParseNode *project_list = NULL;
+    merge_nodes(project_list, result, T_PROJECT_LIST, upper_node);
+
+    ParseNode *select_node = NULL;
+    malloc_select_node(select_node, result->malloc_pool_);
+    if (OB_ISNULL(select_node)) {
+      yyerror(&@1, result, "No more space for malloc\n");
+      YYABORT_NO_MEMORY;
+    } else {
+      select_node->children_[PARSE_SELECT_SELECT] = project_list;
+      select_node->children_[PARSE_SELECT_FROM] = from_list;
+      select_node->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
+      $$ = select_node;
+    }
+  }
+}
 ;
 
 opt_copy_format:
@@ -4442,11 +4490,124 @@ opt_copy_format:
 {
   $$ = NULL;
 }
-| '(' external_file_format_list ')'
+| '(' copy_format_list ')'
 {
   ParseNode *format_list = NULL;
   merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, $2);
   $$ = format_list;
+}
+;
+
+copy_format_list:
+copy_format_item
+{
+  $$ = $1;
+}
+| copy_format_list ',' copy_format_item
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_format_item:
+external_file_format
+{
+  $$ = $1;
+}
+| FORMAT relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $2);
+}
+| FORMAT STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $2);
+}
+| FORMAT COMP_EQ relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $3);
+}
+| FORMAT COMP_EQ STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $3);
+}
+| DELIMITER expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FIELD_TERMINATED_STR, 1, $2);
+  dup_expr_string($$, result, @2.first_column, @2.last_column);
+}
+| DELIMITER COMP_EQ expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FIELD_TERMINATED_STR, 1, $3);
+  dup_expr_string($$, result, @3.first_column, @3.last_column);
+}
+| NAME_OB
+{
+  if (OB_NOT_NULL($1) && OB_NOT_NULL($1->str_value_) && 0 == strcasecmp("header", $1->str_value_)) {
+    ParseNode *true_node = NULL;
+    malloc_terminal_node(true_node, result->malloc_pool_, T_BOOL);
+    if (true_node) {
+      true_node->value_ = 1;
+    }
+    malloc_non_terminal_node($$, result->malloc_pool_, T_PARSE_HEADER, 1, true_node);
+  } else {
+    $$ = $1;
+  }
+}
+| NAME_OB STRING_VALUE
+{
+  if (OB_NOT_NULL($1) && OB_NOT_NULL($1->str_value_)) {
+    if (0 == strcasecmp("nullstr", $1->str_value_) || 0 == strcasecmp("null", $1->str_value_)) {
+      ParseNode *expr_list = NULL;
+      malloc_non_terminal_node(expr_list, result->malloc_pool_, T_EXPR_LIST, 1, $2);
+      malloc_non_terminal_node($$, result->malloc_pool_, T_NULL_IF_EXETERNAL, 1, expr_list);
+    } else if (0 == strcasecmp("delimiter", $1->str_value_)) {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_FIELD_TERMINATED_STR, 1, $2);
+      dup_expr_string($$, result, @2.first_column, @2.last_column);
+    } else if (0 == strcasecmp("quote", $1->str_value_)) {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_CLOSED_STR, 1, $2);
+      dup_expr_string($$, result, @2.first_column, @2.last_column);
+    } else if (0 == strcasecmp("escape", $1->str_value_)) {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_ESCAPED_STR, 1, $2);
+      dup_expr_string($$, result, @2.first_column, @2.last_column);
+    } else {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $2);
+    }
+  } else {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $2);
+  }
+}
+| NAME_OB BOOL_VALUE
+{
+  if (OB_NOT_NULL($1) && OB_NOT_NULL($1->str_value_) && 0 == strcasecmp("header", $1->str_value_)) {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_PARSE_HEADER, 1, $2);
+  } else {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $2);
+  }
+}
+| NAME_OB COMP_EQ expr
+{
+  if (OB_NOT_NULL($1) && OB_NOT_NULL($1->str_value_)) {
+    if (0 == strcasecmp("nullstr", $1->str_value_) || 0 == strcasecmp("null", $1->str_value_)) {
+      ParseNode *expr_list = NULL;
+      malloc_non_terminal_node(expr_list, result->malloc_pool_, T_EXPR_LIST, 1, $3);
+      malloc_non_terminal_node($$, result->malloc_pool_, T_NULL_IF_EXETERNAL, 1, expr_list);
+    } else if (0 == strcasecmp("delimiter", $1->str_value_)) {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_FIELD_TERMINATED_STR, 1, $3);
+      dup_expr_string($$, result, @3.first_column, @3.last_column);
+    } else if (0 == strcasecmp("quote", $1->str_value_)) {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_CLOSED_STR, 1, $3);
+      dup_expr_string($$, result, @3.first_column, @3.last_column);
+    } else if (0 == strcasecmp("escape", $1->str_value_)) {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_ESCAPED_STR, 1, $3);
+      dup_expr_string($$, result, @3.first_column, @3.last_column);
+    } else if (0 == strcasecmp("header", $1->str_value_)) {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_PARSE_HEADER, 1, $3);
+    } else {
+      malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $3);
+    }
+  } else {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $3);
+  }
 }
 ;
 

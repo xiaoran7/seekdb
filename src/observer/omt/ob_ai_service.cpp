@@ -32,6 +32,20 @@ namespace oceanbase
 namespace omt
 {
 
+static void escape_sql_string(const char *src, const int64_t src_len, ObSqlString &dst)
+{
+  for (int64_t i = 0; i < src_len; ++i) {
+    const char c = src[i];
+    if (c == '\'') {
+      dst.append("''");
+    } else if (c == '\\') {
+      dst.append("\\\\");
+    } else {
+      dst.append(&c, 1);
+    }
+  }
+}
+
 ObAiColumnWorkerTask::ObAiColumnWorkerTask()
   : inited_(false), is_running_(false)
 {
@@ -65,7 +79,7 @@ int ObAiColumnWorkerTask::do_work()
   if (OB_FAIL(select_sql.assign_fmt(
       "SELECT table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count "
       "FROM oceanbase.__all_ai_column_task "
-      "WHERE state = 0 OR (state = 3 AND eligible_ts <= now(6)) "
+      "WHERE state = 0 OR (state = 3 AND eligible_ts <= now(6)) OR (state = 1 AND lease_ts <= date_sub(now(6), interval 30 second)) "
       "LIMIT 16"))) {
     return ret;
   }
@@ -125,7 +139,8 @@ int ObAiColumnWorkerTask::do_work()
     int64_t affected_rows = 0;
     lease_sql.assign_fmt(
         "UPDATE oceanbase.__all_ai_column_task SET state = 1, lease_ts = now(6) "
-        "WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu AND state IN (0, 3)",
+        "WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu "
+        "AND (state IN (0, 3) OR (state = 1 AND lease_ts <= date_sub(now(6), interval 30 second)))",
         item.table_id_, item.column_id_, item.rowkey_hash_, item.request_id_);
     sql_proxy->write(lease_sql.ptr(), affected_rows);
   }
@@ -239,12 +254,15 @@ int ObAiColumnWorkerTask::do_work()
         continue;
       }
 
+      ObSqlString escaped_res;
+      escape_sql_string(res_buf, strlen(res_buf), escaped_res);
       ObSqlString save_task_sql;
       int64_t aff = 0;
       save_task_sql.assign_fmt(
-          "UPDATE oceanbase.__all_ai_column_task SET state = 2, request = '%s' "
+          "UPDATE oceanbase.__all_ai_column_task SET state = 2, request = '%.*s' "
           "WHERE table_id = %lu AND column_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
-          res_buf, item.table_id_, item.column_id_, item.rowkey_hash_, item.request_id_);
+          static_cast<int32_t>(escaped_res.length()), escaped_res.ptr(),
+          item.table_id_, item.column_id_, item.rowkey_hash_, item.request_id_);
       sql_proxy->write(save_task_sql.ptr(), aff);
 
       int64_t unready_count = 0;
@@ -292,9 +310,11 @@ int ObAiColumnWorkerTask::do_work()
                 first_set = false;
                 char s_col[OB_MAX_COLUMN_NAME_LENGTH];
                 snprintf(s_col, sizeof(s_col), "__ai_state_%.*s", col_n.length(), col_n.ptr());
+                ObSqlString escaped_val;
+                escape_sql_string(result_val.ptr(), result_val.length(), escaped_val);
                 update_row_sql.append_fmt("`%.*s` = '%.*s', `%s` = %d",
                                           col_n.length(), col_n.ptr(),
-                                          result_val.length(), result_val.ptr(),
+                                          static_cast<int32_t>(escaped_val.length()), escaped_val.ptr(),
                                           s_col, static_cast<int>(share::AI_COLUMN_TASK_READY));
               }
             }

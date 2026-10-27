@@ -932,8 +932,15 @@ int ObSelectIntoOp::print_field(const ObObj &obj, ObCsvFileWriter &data_writer)
   if (!has_escape_) {
     OZ(write_obj_to_file(obj, data_writer, false));
   } else if (obj.is_null()) {
-    OZ(write_single_char_to_file(&char_escape_, data_writer));
-    OZ(write_single_char_to_file(&char_n, data_writer));
+    if (external_properties_.csv_format_.null_if_.count() > 0) {
+      ObObj null_obj;
+      null_obj.set_varchar(external_properties_.csv_format_.null_if_.at(0));
+      null_obj.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+      OZ(write_obj_to_file(null_obj, data_writer, false));
+    } else {
+      OZ(write_single_char_to_file(&char_escape_, data_writer));
+      OZ(write_single_char_to_file(&char_n, data_writer));
+    }
   } else {
     OZ(write_obj_to_file(obj, data_writer, true));
   }
@@ -952,6 +959,25 @@ int ObSelectIntoOp::into_outfile(ObExternalFileWriter *data_writer)
   ObCsvFileWriter *csv_data_writer = NULL;
   if (OB_ISNULL(csv_data_writer = static_cast<ObCsvFileWriter *>(data_writer))) {
     ret = OB_ERR_UNEXPECTED;
+  }
+  if (OB_SUCC(ret) && is_first_) {
+    is_first_ = false;
+    if (external_properties_.csv_format_.parse_header_) {
+      const ObPhysicalPlan *phy_plan = ctx_.get_physical_plan_ctx() ? ctx_.get_physical_plan_ctx()->get_phy_plan() : NULL;
+      if (OB_NOT_NULL(phy_plan) && phy_plan->get_field_columns().count() == select_exprs.count()) {
+        const common::ColumnsFieldArray &fields = phy_plan->get_field_columns();
+        for (int64_t i = 0; OB_SUCC(ret) && i < fields.count(); ++i) {
+          ObObj col_obj;
+          col_obj.set_varchar(fields.at(i).cname_);
+          col_obj.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+          OZ(write_obj_to_file(col_obj, *csv_data_writer, false));
+          if (OB_SUCC(ret) && i != fields.count() - 1) {
+            OZ(write_obj_to_file(field_str_, *csv_data_writer));
+          }
+        }
+        OZ(write_obj_to_file(line_str_, *csv_data_writer));
+      }
+    }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < select_exprs.count(); ++i) {
     if (OB_ISNULL(select_exprs.at(i))) {
@@ -995,6 +1021,29 @@ int ObSelectIntoOp::into_outfile_batch_csv(const ObBatchRows &brs, ObExternalFil
   for (int64_t i = 0; OB_SUCC(ret) && i < select_exprs.count(); ++i) {
     if (OB_FAIL(select_exprs.at(i)->eval_batch(eval_ctx_, *brs.skip_, brs.size_))) {
     } else if (OB_FAIL(datum_vectors.push_back(select_exprs.at(i)->locate_expr_datumvector(eval_ctx_)))) {
+    }
+  }
+  if (OB_SUCC(ret) && is_first_) {
+    is_first_ = false;
+    if (external_properties_.csv_format_.parse_header_) {
+      if (OB_ISNULL(csv_data_writer = static_cast<ObCsvFileWriter *>(data_writer))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const ObPhysicalPlan *phy_plan = ctx_.get_physical_plan_ctx() ? ctx_.get_physical_plan_ctx()->get_phy_plan() : NULL;
+        if (OB_NOT_NULL(phy_plan) && phy_plan->get_field_columns().count() == select_exprs.count()) {
+          const common::ColumnsFieldArray &fields = phy_plan->get_field_columns();
+          for (int64_t i = 0; OB_SUCC(ret) && i < fields.count(); ++i) {
+            ObObj col_obj;
+            col_obj.set_varchar(fields.at(i).cname_);
+            col_obj.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+            OZ(write_obj_to_file(col_obj, *csv_data_writer, false));
+            if (OB_SUCC(ret) && i != fields.count() - 1) {
+              OZ(write_obj_to_file(field_str_, *csv_data_writer));
+            }
+          }
+          OZ(write_obj_to_file(line_str_, *csv_data_writer));
+        }
+      }
     }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < brs.size_; ++i) {

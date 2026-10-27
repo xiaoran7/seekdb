@@ -2446,21 +2446,33 @@ int ObDMLService::handle_ai_column_insert(const ObInsCtDef &ins_ctdef, ObTableMo
           ObDatum *pk_datum = nullptr;
           if (OB_FAIL(ins_ctdef.new_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), pk_datum))) {
           } else if (OB_NOT_NULL(pk_datum) && !pk_datum->is_null()) {
-            int64_t pk_val = pk_datum->get_int();
-            char pred_buf[128];
-            snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
-                     pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), pk_val);
-            uint64_t rowkey_hash = static_cast<uint64_t>(pk_val);
+            char pred_buf[128] = {0};
+            char rowkey_buf[128] = {0};
+            uint64_t rowkey_hash = 0;
+            if (ob_is_string_tc(pk_col->get_data_type())) {
+              ObString str = pk_datum->get_string();
+              rowkey_hash = str.hash();
+              snprintf(rowkey_buf, sizeof(rowkey_buf), "%.*s", str.length(), str.ptr());
+              snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = '%.*s'",
+                       pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(),
+                       str.length(), str.ptr());
+            } else {
+              int64_t pk_val = pk_datum->get_int();
+              rowkey_hash = static_cast<uint64_t>(pk_val);
+              snprintf(rowkey_buf, sizeof(rowkey_buf), "%ld", pk_val);
+              snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
+                       pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), pk_val);
+            }
             uint64_t req_id = ObTimeUtility::current_time() ^ (rowkey_hash << 16);
             if (OB_FAIL(dml_op.open_inner_conn())) {
             } else {
               for (int64_t a = 0; OB_SUCC(ret) && a < ai_col_ids.count(); ++a) {
                 ObSqlString sql;
                 if (OB_FAIL(sql.assign_fmt(
-                    "INSERT INTO oceanbase.__all_ai_column_task "
+                    "REPLACE INTO oceanbase.__all_ai_column_task "
                     "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
-                    "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '', 0, '')",
-                    table_id, ai_col_ids.at(a), rowkey_hash, req_id, pk_val, pred_buf))) {
+                    "VALUES (%lu, %lu, %lu, %lu, '%s', '%s', 0, 0, now(6), 0, '', 0, '')",
+                    table_id, ai_col_ids.at(a), rowkey_hash, req_id, rowkey_buf, pred_buf))) {
                 } else if (OB_FAIL(dml_op.execute_write(sql.ptr()))) {
                   LOG_WARN("failed to insert ai column task", K(ret), K(sql));
                 }
@@ -2526,10 +2538,17 @@ int ObDMLService::handle_ai_column_delete(const ObDelCtDef &del_ctdef, ObTableMo
           ObDatum *pk_datum = nullptr;
           if (OB_FAIL(del_ctdef.old_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), pk_datum))) {
           } else if (OB_NOT_NULL(pk_datum) && !pk_datum->is_null()) {
-            int64_t pk_val = pk_datum->get_int();
-            char pred_buf[128];
-            snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
-                     pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), pk_val);
+            char pred_buf[128] = {0};
+            if (ob_is_string_tc(pk_col->get_data_type())) {
+              ObString str = pk_datum->get_string();
+              snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = '%.*s'",
+                       pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(),
+                       str.length(), str.ptr());
+            } else {
+              int64_t pk_val = pk_datum->get_int();
+              snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
+                       pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), pk_val);
+            }
             if (OB_FAIL(dml_op.open_inner_conn())) {
             } else {
               ObSqlString sql;
@@ -2622,9 +2641,13 @@ int ObDMLService::handle_ai_column_update(const ObUpdCtDef &upd_ctdef, ObUpdRtDe
         }
       }
       if (OB_NOT_NULL(pk_col)) {
-        int64_t old_pk_val = 0;
-        int64_t new_pk_val = 0;
         bool pk_changed = false;
+        char old_pred_buf[128] = {0};
+        char new_pred_buf[128] = {0};
+        char old_rowkey_buf[128] = {0};
+        char new_rowkey_buf[128] = {0};
+        uint64_t old_rowkey_hash = 0;
+        uint64_t new_rowkey_hash = 0;
         ObDatum *old_datum = nullptr;
         ObDatum *new_datum = nullptr;
         int64_t pk_proj_idx = -1;
@@ -2637,53 +2660,81 @@ int ObDMLService::handle_ai_column_update(const ObUpdCtDef &upd_ctdef, ObUpdRtDe
         if (pk_proj_idx < 0) {
           pk_proj_idx = 0;
         }
-        if (pk_proj_idx >= 0 && pk_proj_idx < upd_ctdef.old_row_.count() &&
-            OB_SUCC(upd_ctdef.old_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), old_datum)) &&
-            OB_NOT_NULL(old_datum) && !old_datum->is_null()) {
-          old_pk_val = old_datum->get_int();
-        }
-        if (pk_proj_idx >= 0 && pk_proj_idx < upd_ctdef.new_row_.count() &&
-            OB_SUCC(upd_ctdef.new_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), new_datum)) &&
-            OB_NOT_NULL(new_datum) && !new_datum->is_null()) {
-          new_pk_val = new_datum->get_int();
-        }
-        if (old_pk_val != 0 && new_pk_val != 0 && old_pk_val != new_pk_val) {
-          pk_changed = true;
+
+        if (ob_is_string_tc(pk_col->get_data_type())) {
+          ObString old_str;
+          ObString new_str;
+          if (pk_proj_idx >= 0 && pk_proj_idx < upd_ctdef.old_row_.count() &&
+              OB_SUCC(upd_ctdef.old_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), old_datum)) &&
+              OB_NOT_NULL(old_datum) && !old_datum->is_null()) {
+            old_str = old_datum->get_string();
+          }
+          if (pk_proj_idx >= 0 && pk_proj_idx < upd_ctdef.new_row_.count() &&
+              OB_SUCC(upd_ctdef.new_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), new_datum)) &&
+              OB_NOT_NULL(new_datum) && !new_datum->is_null()) {
+            new_str = new_datum->get_string();
+          }
+          old_rowkey_hash = old_str.hash();
+          new_rowkey_hash = new_str.hash();
+          snprintf(old_rowkey_buf, sizeof(old_rowkey_buf), "%.*s", old_str.length(), old_str.ptr());
+          snprintf(new_rowkey_buf, sizeof(new_rowkey_buf), "%.*s", new_str.length(), new_str.ptr());
+          snprintf(old_pred_buf, sizeof(old_pred_buf), "`%.*s` = '%.*s'",
+                   pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(),
+                   old_str.length(), old_str.ptr());
+          snprintf(new_pred_buf, sizeof(new_pred_buf), "`%.*s` = '%.*s'",
+                   pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(),
+                   new_str.length(), new_str.ptr());
+          if (!old_str.empty() && !new_str.empty() && old_str != new_str) {
+            pk_changed = true;
+          }
+        } else {
+          int64_t old_pk_val = 0;
+          int64_t new_pk_val = 0;
+          if (pk_proj_idx >= 0 && pk_proj_idx < upd_ctdef.old_row_.count() &&
+              OB_SUCC(upd_ctdef.old_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), old_datum)) &&
+              OB_NOT_NULL(old_datum) && !old_datum->is_null()) {
+            old_pk_val = old_datum->get_int();
+          }
+          if (pk_proj_idx >= 0 && pk_proj_idx < upd_ctdef.new_row_.count() &&
+              OB_SUCC(upd_ctdef.new_row_.at(pk_proj_idx)->eval(dml_op.get_eval_ctx(), new_datum)) &&
+              OB_NOT_NULL(new_datum) && !new_datum->is_null()) {
+            new_pk_val = new_datum->get_int();
+          }
+          old_rowkey_hash = static_cast<uint64_t>(old_pk_val);
+          new_rowkey_hash = static_cast<uint64_t>(new_pk_val);
+          snprintf(old_rowkey_buf, sizeof(old_rowkey_buf), "%ld", old_pk_val);
+          snprintf(new_rowkey_buf, sizeof(new_rowkey_buf), "%ld", new_pk_val);
+          snprintf(old_pred_buf, sizeof(old_pred_buf), "`%.*s` = %ld",
+                   pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), old_pk_val);
+          snprintf(new_pred_buf, sizeof(new_pred_buf), "`%.*s` = %ld",
+                   pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), new_pk_val);
+          if (old_pk_val != 0 && new_pk_val != 0 && old_pk_val != new_pk_val) {
+            pk_changed = true;
+          }
         }
 
         if (pk_changed) {
           if (OB_FAIL(dml_op.open_inner_conn())) {
           } else {
-            char old_pred_buf[128];
-            snprintf(old_pred_buf, sizeof(old_pred_buf), "`%.*s` = %ld",
-                     pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), old_pk_val);
             ObSqlString del_sql;
             del_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND rowkey_predicate = '%s'",
                                table_id, old_pred_buf);
             dml_op.execute_write(del_sql.ptr());
 
-            char new_pred_buf[128];
-            snprintf(new_pred_buf, sizeof(new_pred_buf), "`%.*s` = %ld",
-                     pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), new_pk_val);
-            uint64_t rowkey_hash = static_cast<uint64_t>(new_pk_val);
-            uint64_t req_id = ObTimeUtility::current_time() ^ (rowkey_hash << 16);
+            uint64_t req_id = ObTimeUtility::current_time() ^ (new_rowkey_hash << 16);
             for (int64_t a = 0; a < ai_items.count(); ++a) {
               ObSqlString ins_sql;
               ins_sql.assign_fmt(
-                  "INSERT INTO oceanbase.__all_ai_column_task "
+                  "REPLACE INTO oceanbase.__all_ai_column_task "
                   "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
-                  "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '', 0, '')",
-                  table_id, ai_items.at(a).column_id_, rowkey_hash, req_id, new_pk_val, new_pred_buf);
+                  "VALUES (%lu, %lu, %lu, %lu, '%s', '%s', 0, 0, now(6), 0, '', 0, '')",
+                  table_id, ai_items.at(a).column_id_, new_rowkey_hash, req_id, new_rowkey_buf, new_pred_buf);
               dml_op.execute_write(ins_sql.ptr());
             }
           }
         } else {
           // Check if any dependent column for each AI column changed
-          char pred_buf[128];
-          snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
-                   pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), old_pk_val);
-          uint64_t rowkey_hash = static_cast<uint64_t>(old_pk_val);
-          uint64_t req_id = ObTimeUtility::current_time() ^ (rowkey_hash << 16);
+          uint64_t req_id = ObTimeUtility::current_time() ^ (old_rowkey_hash << 16);
 
           for (int64_t a = 0; a < ai_items.count(); ++a) {
             bool dep_changed = false;
@@ -2701,15 +2752,15 @@ int ObDMLService::handle_ai_column_update(const ObUpdCtDef &upd_ctdef, ObUpdRtDe
               if (OB_SUCC(dml_op.open_inner_conn())) {
                 ObSqlString del_sql;
                 del_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate = '%s'",
-                                   table_id, ai_item.column_id_, pred_buf);
+                                   table_id, ai_item.column_id_, old_pred_buf);
                 dml_op.execute_write(del_sql.ptr());
 
                 ObSqlString ins_sql;
                 ins_sql.assign_fmt(
-                    "INSERT INTO oceanbase.__all_ai_column_task "
+                    "REPLACE INTO oceanbase.__all_ai_column_task "
                     "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
-                    "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '', 0, '')",
-                    table_id, ai_item.column_id_, rowkey_hash, req_id, old_pk_val, pred_buf);
+                    "VALUES (%lu, %lu, %lu, %lu, '%s', '%s', 0, 0, now(6), 0, '', 0, '')",
+                    table_id, ai_item.column_id_, old_rowkey_hash, req_id, old_rowkey_buf, old_pred_buf);
                 dml_op.execute_write(ins_sql.ptr());
               }
             }

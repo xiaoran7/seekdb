@@ -1649,13 +1649,24 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTab
                   int64_t del_rows = 0;
                   OZ(sql_proxy->write(del_task_sql.ptr(), del_rows));
 
+                  ObSqlString escaped_req;
+                  for (int64_t c_idx = 0; c_idx < tinfo.req_str_.length(); ++c_idx) {
+                    const char c = tinfo.req_str_.ptr()[c_idx];
+                    if (c == '\'') {
+                      escaped_req.append("''");
+                    } else if (c == '\\') {
+                      escaped_req.append("\\\\");
+                    } else {
+                      escaped_req.append(&c, 1);
+                    }
+                  }
                   ObSqlString ins_task_sql;
                   OZ(ins_task_sql.assign_fmt(
-                      "INSERT INTO oceanbase.__all_ai_column_task "
+                      "REPLACE INTO oceanbase.__all_ai_column_task "
                       "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
                       "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '%.*s', 0, '')",
                       table_id, column_id, rowkey_hash, req_group_id, tinfo.pk_val_, pred_buf,
-                      tinfo.req_str_.length(), tinfo.req_str_.ptr()));
+                      static_cast<int32_t>(escaped_req.length()), escaped_req.ptr()));
                   int64_t ins_rows = 0;
                   OZ(sql_proxy->write(ins_task_sql.ptr(), ins_rows));
                 }

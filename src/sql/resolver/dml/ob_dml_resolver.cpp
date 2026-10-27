@@ -1995,6 +1995,13 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
             if (OB_NOT_NULL(sql_proxy)) {
               ObSqlString check_sql;
               ObString db_name = session_info_->get_database_name();
+              if (OB_NOT_NULL(params_.schema_checker_) && OB_NOT_NULL(params_.schema_checker_->get_schema_guard())) {
+                const ObSimpleDatabaseSchema *db_schema = NULL;
+                if (OB_SUCC(params_.schema_checker_->get_schema_guard()->get_database_schema(
+                        table_schema->get_database_id(), db_schema)) && OB_NOT_NULL(db_schema)) {
+                  db_name = db_schema->get_database_name_str();
+                }
+              }
               int64_t count = 0;
               if (OB_FAIL(check_sql.assign_fmt(
                       "SELECT COUNT(*) AS cnt FROM `%.*s`.`%.*s` WHERE `%.*s` != %d",
@@ -12992,6 +12999,9 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableIte
                        OB_FAIL(rename_file_table_columns(*column_alias_node, *new_table_item))) {
             } else {
               table_item = new_table_item;
+              if (OB_NOT_NULL(dml_stmt->get_query_ctx())) {
+                dml_stmt->get_query_ctx()->get_query_hint_for_update().get_global_hint().merge_plan_cache_hint(OB_USE_PLAN_CACHE_NONE);
+              }
             }
           }
         }
