@@ -119,9 +119,32 @@ static inline void ob_vsag_trace(const char *fn, const void *h, long a, long b) 
   (void)fn; (void)h; (void)a; (void)b;
 #endif
 }
+struct ObCuvsRegisterJob {
+  const float *vectors;
+  int size;
+  int dim;
+  void *bridge;
+};
+static void *ob_cuvs_register_runner(void *arg) {
+  ObCuvsRegisterJob *j = static_cast<ObCuvsRegisterJob *>(arg);
+  if (j != nullptr && j->vectors != nullptr && j->size > 0 && j->dim > 0) {
+    j->bridge = seekdb_cuvs_build(j->vectors, static_cast<long>(j->size), static_cast<long>(j->dim));
+  }
+  return nullptr;
+}
 static void ob_cuvs_register(void *key, const float *vectors, const int64_t *ids,
                              int dim, int size) {
-  void *bridge = seekdb_cuvs_build(vectors, size, dim);
+  if (vectors == nullptr || ids == nullptr || dim <= 0 || size <= 0) { return; }
+  ObCuvsRegisterJob job{vectors, size, dim, nullptr};
+  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
+  if (pthread_create(&tid, &attr, ob_cuvs_register_runner, &job) == 0) {
+    pthread_join(tid, nullptr);
+  } else {
+    job.bridge = seekdb_cuvs_build(vectors, size, dim);
+  }
+  pthread_attr_destroy(&attr);
+  void *bridge = job.bridge;
   if (bridge == nullptr) { return; }
   ObCuvsEntry *ent = new ObCuvsEntry();
   ent->bridge_ = bridge; ent->dim_ = dim; ent->ids_.assign(ids, ids + size);

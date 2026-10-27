@@ -64,10 +64,10 @@
    * **独立 32MB 栈线程隔离保护**：OceanBase 原生工作线程栈仅 1.5MB，hipVS 构图在批量处理时容易触发深调用栈。适配器采用独立 32MB 栈 pthread (`pthread_attr_setstacksize`) 隔离执行 GPU 构建，彻底杜绝栈溢出（SIGSEGV）崩溃；
    * **严密有效性校验与防伪回退**：严格验证 GPU 构建输出句柄 `job.handle_ != nullptr`，只有在 GPU 真正成功完成显存构图时才标记 GPU 构建成功并更新 Telemetry 指标；一旦 GPU 驱动未加载或返回 NULL，立即如实触发 `did_fallback = true`，绝不虚报成功；
    * 建立完整的 Telemetry 状态审计机（记录 `gpu_build_count_`, `cpu_fallback_count_`, `last_gpu_build_ms_`, `last_execution_fallback_`）。
-2. **`seekdb/src/oblib/lib/vector/ob_vsag_adaptor.cpp`（修改）**：
-   * 在 `HnswIndexHandler::build_index` 中接入 `ObHipvsAdaptor::accelerate_hnsw_build`；
-   * 当 GPU 就绪且向量规模达到批处理阈值（$N \ge 500$）时自动由 GPU 接管核心构图；
-   * 异常或不可用时，捕获异常并无缝回退至 CPU 原生 `index_->Build(base)`，打印回退告警日志。
+2. **`seekdb/src/oblib/lib/vector/ob_vsag_adaptor.cpp`（加固与打通）**：
+   * 接入 `ob_cuvs_register` 与 `ob_cuvs_job`，打通批量向量的 GPU CAGRA 构图与 HNSW 映射数据流；
+   * **双轨栈隔离加固**：针对 `ob_cuvs_register` 批量构图入口全面引入 32MB 独立栈 pthread 隔离保护（`ObCuvsRegisterJob` + `pthread_attr_setstacksize`），杜绝原生 1.5MB 工作线程触发 SIGSEGV；
+   * 支持通过 `lib=cuvs` 指令无缝挂载 AMD GPU 拓扑；当 GPU 驱动就绪时由 GPU 硬件矩阵乘并行处理，不可用或异常时无缝回退至 CPU 原生 VSAG 路径。
 3. **`seekdb/src/oblib/lib/vector/ob_vector_util.h` 与 `ob_vector_util.cpp`（扩展）**：
    * 暴露 `is_hipvs_gpu_build_available()` 与 `get_last_build_was_gpu()` 接口，供执行器和运维视图核验构建状态。
 
