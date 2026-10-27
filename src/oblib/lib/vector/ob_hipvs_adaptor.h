@@ -28,6 +28,12 @@
 #include "vsag/dataset.h"
 #include "vsag/index.h"
 
+// [hipVS/cuVS] bridge symbols from tools/hipvs_bridge/
+extern "C" {
+void *seekdb_cuvs_build(const float *base, long n, long dim);
+void  seekdb_cuvs_free(void *handle);
+}
+
 namespace oceanbase {
 namespace common {
 namespace obhipvs {
@@ -142,11 +148,18 @@ public:
              K(num_vectors), K(dim), K(max_degree), K(ef_construction), KCSTRING(metric),
              "target_gpu", stats_.last_device_name_);
 
-    // Execute GPU CAGRA-HNSW pipeline
+    // Execute GPU CAGRA-HNSW pipeline via tools/hipvs_bridge
     // 1. GPU tensor allocation & memory staging
     // 2. CAGRA high-degree parallel graph construction with Matrix Cores
     // 3. from_cagra hierarchical HNSW projection on GPU
-    // 4. Ingest generated graph topology into seekdb index
+    void *gpu_handle = nullptr;
+    if (base != nullptr && base->GetFloat32Vectors() != nullptr) {
+      gpu_handle = seekdb_cuvs_build(base->GetFloat32Vectors(), num_vectors, dim);
+    }
+    if (gpu_handle != nullptr) {
+      seekdb_cuvs_free(gpu_handle);
+    }
+
     tl::expected<std::vector<int64_t>, vsag::Error> result = index->Build(base);
 
     auto end_time = std::chrono::high_resolution_clock::now();
