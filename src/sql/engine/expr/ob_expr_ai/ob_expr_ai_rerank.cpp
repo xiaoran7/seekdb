@@ -57,6 +57,9 @@ int extract_rerank_index_and_score(ObJsonNode *node,
     ObJsonObject *obj = static_cast<ObJsonObject *>(node);
     ObJsonNode *idx_node = obj->get_value("index");
     ObJsonNode *score_node = obj->get_value("relevance_score");
+    if (OB_ISNULL(score_node)) {
+      score_node = obj->get_value("score");
+    }
     if (OB_ISNULL(idx_node) || OB_ISNULL(score_node)) {
       ret = OB_INVALID_DATA;
     } else if (idx_node->json_type() != ObJsonNodeType::J_INT
@@ -104,7 +107,7 @@ int sort_rerank_result_array(ObIAllocator &allocator,
     ret = OB_INVALID_DATA;
   } else {
     const int64_t cnt = raw_array->element_count();
-    if (cnt <= 0 || (expected_count > 0 && cnt != expected_count)) {
+    if (cnt <= 0 || (expected_count > 0 && cnt > expected_count)) {
       ret = OB_INVALID_DATA;
     } else {
       struct RerankItem {

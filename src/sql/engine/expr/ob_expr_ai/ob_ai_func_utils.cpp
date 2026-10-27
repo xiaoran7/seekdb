@@ -1127,8 +1127,7 @@ int ObAIFuncJsonUtils::print_json_to_str(ObIAllocator &allocator, ObIJsonBase *b
   int ret = OB_SUCCESS;
   ObJsonBuffer j_buf(&allocator);
   if (OB_FAIL(base_node->print(j_buf, 0))) {
-  } else {
-    str = j_buf.string();
+  } else if (OB_FAIL(j_buf.get_result_string(str))) {
   }
   return ret;
 }
@@ -1538,10 +1537,11 @@ int ObAIFuncModel::call_completion_vector(ObArray<ObString> &prompts, ObJsonObje
     for (int i = 0; OB_SUCC(ret) && i < response_array.count(); i++) {
       ObJsonObject *response = response_array[i];
       ObStringBuffer result_buf(allocator_);
+      ObString res_str;
       if (OB_FAIL(complete_provider->parse_output(*allocator_, response, result_base))) {
       } else if (OB_FAIL(result_base->print(result_buf, 0))) {
-      } else {
-        results.push_back(result_buf.string());
+      } else if (OB_FAIL(result_buf.get_result_string(res_str))) {
+      } else if (OB_FAIL(results.push_back(res_str))) {
       }
     }
   }
@@ -1604,10 +1604,11 @@ int ObAIFuncModel::call_dense_embedding_vector(ObArray<ObString> &contents, ObJs
     for (int i = 0; OB_SUCC(ret) && i < response_array.count(); i++) {
       ObJsonObject *response = response_array[i];
       ObStringBuffer result_buf(allocator_);
+      ObString res_str;
       if (OB_FAIL(embed_provider->parse_output(*allocator_, response, result_base))) {
       } else if (OB_FAIL(result_base->print(result_buf, 0))) {
-      } else {
-        results.push_back(result_buf.string());
+      } else if (OB_FAIL(result_buf.get_result_string(res_str))) {
+      } else if (OB_FAIL(results.push_back(res_str))) {
       }
     }
   }
@@ -1684,8 +1685,7 @@ int ObAIFuncModel::call_dense_embedding_vector_v2(ObArray<ObString> &content, Ob
           }
           if (OB_SUCC(ret)) {
             if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(*allocator_, j_base, result_str))) {
-            } else {
-              results.push_back(result_str);
+            } else if (OB_FAIL(results.push_back(result_str))) {
             }
           }
         }
@@ -1853,15 +1853,21 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
           int64_t start_pos = i;
           int64_t end_pos = start_pos;
           bool found_end = false;
+          bool has_negative = false;
           for (int64_t j = start_pos + 1; j < template_len && !found_end; j++) {
             if (template_ptr[j] == '}') {
               end_pos = j;
               found_end = true;
+            } else if (j == start_pos + 1 && template_ptr[j] == '-') {
+              has_negative = true;
             } else if (template_ptr[j] < '0' || template_ptr[j] > '9') {
               break;
             }
           }
-          if (found_end && end_pos > start_pos + 1) {
+          if (found_end && has_negative && end_pos > start_pos + 2) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt: invalid placeholder index");
+          } else if (found_end && end_pos > start_pos + 1) {
             int64_t index = 0;
             bool valid_index = true;
             for (int64_t k = start_pos + 1; k < end_pos && valid_index; k++) {
@@ -1890,7 +1896,8 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
         }
       }
       if (OB_SUCC(ret)) {
-        replaced_prompt_str = result_buf.string();
+        if (OB_FAIL(result_buf.get_result_string(replaced_prompt_str))) {
+        }
       }
     }
   }
