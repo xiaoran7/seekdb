@@ -177,9 +177,34 @@ int ObAiColumnWorkerTask::do_work()
       continue;
     }
 
+    ObSqlString eval_expr;
+    const char *norm_ptr = ai_schema.normalized_expr_.ptr();
+    const int32_t norm_len = ai_schema.normalized_expr_.length();
+    const char *json_pos = (norm_ptr != nullptr) ? strcasestr(norm_ptr, "valid JSON value") : nullptr;
+    const char *int_pos = (norm_ptr != nullptr) ? strcasestr(norm_ptr, "base-10 integer") : nullptr;
+    if (json_pos != nullptr || int_pos != nullptr) {
+      const char *comment_pos = strstr(norm_ptr, "/*");
+      if (comment_pos != nullptr) {
+        const char *paren = comment_pos - 1;
+        while (paren > norm_ptr && isspace(*paren)) paren--;
+        if (*paren == ')') {
+          int32_t prefix_len = static_cast<int32_t>(paren - norm_ptr);
+          const char *sys_content = (json_pos != nullptr)
+              ? "Return exactly one valid JSON value"
+              : "Return exactly one base-10 integer";
+          eval_expr.assign_fmt("%.*s, '{\"system\":\"%s\"}') %.*s",
+                              prefix_len, norm_ptr, sys_content,
+                              static_cast<int32_t>(norm_len - (comment_pos - norm_ptr)), comment_pos);
+        }
+      }
+    }
+    if (eval_expr.empty()) {
+      eval_expr.assign_fmt("%.*s", norm_len, norm_ptr);
+    }
+
     ObSqlString eval_sql;
     eval_sql.assign_fmt("SELECT %.*s AS ai_res FROM `%s`.`%s` WHERE %s",
-                        ai_schema.normalized_expr_.length(), ai_schema.normalized_expr_.ptr(),
+                        static_cast<int32_t>(eval_expr.length()), eval_expr.ptr(),
                         db_name, table_name, item.rowkey_pred_);
 
     bool eval_succ = false;

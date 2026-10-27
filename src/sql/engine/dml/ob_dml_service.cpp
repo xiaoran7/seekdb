@@ -2684,7 +2684,7 @@ int ObDMLService::handle_ai_column_update(const ObUpdCtDef &upd_ctdef, ObUpdRtDe
           snprintf(new_pred_buf, sizeof(new_pred_buf), "`%.*s` = '%.*s'",
                    pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(),
                    new_str.length(), new_str.ptr());
-          if (!old_str.empty() && !new_str.empty() && old_str != new_str) {
+          if (old_str != new_str) {
             pk_changed = true;
           }
         } else {
@@ -2708,7 +2708,7 @@ int ObDMLService::handle_ai_column_update(const ObUpdCtDef &upd_ctdef, ObUpdRtDe
                    pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), old_pk_val);
           snprintf(new_pred_buf, sizeof(new_pred_buf), "`%.*s` = %ld",
                    pk_col->get_column_name_str().length(), pk_col->get_column_name_str().ptr(), new_pk_val);
-          if (old_pk_val != 0 && new_pk_val != 0 && old_pk_val != new_pk_val) {
+          if (old_pk_val != new_pk_val) {
             pk_changed = true;
           }
         }

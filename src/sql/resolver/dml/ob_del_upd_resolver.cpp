@@ -432,6 +432,26 @@ int ObDelUpdResolver::generate_wrapper_expr_for_assignemnts(ObIArray<ObAssignmen
   return ret;
 }
 
+static bool check_column_in_ai_expr(const ObString &col_name, const ObString &expr)
+{
+  bool found = false;
+  if (!col_name.empty() && !expr.empty()) {
+    const char *p = expr.ptr();
+    int32_t len = expr.length();
+    int32_t c_len = col_name.length();
+    for (int32_t i = 0; !found && i + c_len <= len; ++i) {
+      if (0 == strncasecmp(p + i, col_name.ptr(), c_len)) {
+        bool left_ok = (i == 0 || (!isalnum(p[i - 1]) && p[i - 1] != '_' && p[i - 1] != '`'));
+        bool right_ok = (i + c_len == len || (!isalnum(p[i + c_len]) && p[i + c_len] != '_' && p[i + c_len] != '`'));
+        if (left_ok && right_ok) {
+          found = true;
+        }
+      }
+    }
+  }
+  return found;
+}
+
 int ObDelUpdResolver::check_update_vector_col_with_vector_index(const ObTableSchema *table_schema,
                                                                 ObSchemaGetterGuard *schema_guard,
                                                                 const common::ObIArray<ObAssignment> &assigns,
@@ -470,35 +490,46 @@ int ObDelUpdResolver::check_update_vector_col_with_vector_index(const ObTableSch
       if (has_exist_in_array(part_key_col_ids, as.column_expr_->get_column_id())) {
         update_with_vector_index = true;
       }
-    } 
+    }
     if (OB_SUCC(ret) && has_extra_info && !update_with_vector_index && !row_key_col_ids.empty()) {
       // check if has extra_info, update with row key should also update vid
       if (has_exist_in_array(row_key_col_ids, as.column_expr_->get_column_id())) {
         update_with_vector_index = true;
       }
     }
-  }
-  return ret;
-}
-
-static bool check_column_in_ai_expr(const ObString &col_name, const ObString &expr)
-{
-  bool found = false;
-  if (!col_name.empty() && !expr.empty()) {
-    const char *p = expr.ptr();
-    int32_t len = expr.length();
-    int32_t c_len = col_name.length();
-    for (int32_t i = 0; !found && i + c_len <= len; ++i) {
-      if (0 == strncasecmp(p + i, col_name.ptr(), c_len)) {
-        bool left_ok = (i == 0 || (!isalnum(p[i - 1]) && p[i - 1] != '_' && p[i - 1] != '`'));
-        bool right_ok = (i + c_len == len || (!isalnum(p[i + c_len]) && p[i + c_len] != '_' && p[i + c_len] != '`'));
-        if (left_ok && right_ok) {
-          found = true;
+    if (OB_SUCC(ret) && !update_with_vector_index && OB_NOT_NULL(as.column_expr_)) {
+      const ObColumnSchemaV2 *as_col = table_schema->get_column_schema(as.column_expr_->get_column_id());
+      if (OB_NOT_NULL(as_col) && !as_col->is_hidden()) {
+        const ObString &as_cname = as_col->get_column_name_str();
+        for (ObTableSchema::const_column_iterator c_it = table_schema->column_begin();
+             OB_SUCC(ret) && !update_with_vector_index && c_it != table_schema->column_end(); ++c_it) {
+          const ObColumnSchemaV2 *c = *c_it;
+          if (OB_NOT_NULL(c) && !c->is_hidden()) {
+            char req_name[OB_MAX_COLUMN_NAME_LENGTH];
+            snprintf(req_name, sizeof(req_name), "__ai_request_%.*s",
+                     c->get_column_name_str().length(), c->get_column_name_str().ptr());
+            const ObColumnSchemaV2 *req_col = table_schema->get_column_schema(req_name);
+            if (OB_NOT_NULL(req_col)) {
+              ObString norm_expr = req_col->get_cur_default_value().get_string();
+              if (norm_expr.empty() || check_column_in_ai_expr(as_cname, norm_expr)) {
+                bool has_vidx = false;
+                ObIndexType v_idx_type = INDEX_TYPE_MAX;
+                if (OB_FAIL(ObVectorIndexUtil::check_column_has_vector_index(*table_schema,
+                                                                             *schema_guard,
+                                                                             c->get_column_id(),
+                                                                             has_vidx,
+                                                                             v_idx_type))) {
+                } else if (has_vidx) {
+                  update_with_vector_index = true;
+                }
+              }
+            }
+          }
         }
       }
     }
   }
-  return found;
+  return ret;
 }
 
 int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment> &assigns,
