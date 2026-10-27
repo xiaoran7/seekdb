@@ -1532,10 +1532,12 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTab
           if (OB_FAIL(share::ObAiColumnProxy::load_ai_column(*sql_proxy, alloc, table_id, column_id, ai_meta))) {
             LOG_WARN("failed to load ai column meta", K(ret), K(table_id), K(column_id));
           } else {
+            const ObColumnSchemaV2 *pk_col = nullptr;
             ObString pk_col_name;
             for (int64_t i = 0; i < table_schema->get_column_count(); ++i) {
               const ObColumnSchemaV2 *c = table_schema->get_column_schema_by_idx(i);
               if (OB_NOT_NULL(c) && c->is_rowkey_column()) {
+                pk_col = c;
                 pk_col_name = c->get_column_name_str();
                 break;
               }
@@ -1543,6 +1545,7 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTab
             if (pk_col_name.empty()) {
               pk_col_name = ObString::make_string("id");
             }
+            const bool pk_is_str = (OB_NOT_NULL(pk_col) && ob_is_string_tc(pk_col->get_data_type()));
 
             ObString expr_arg;
             const char *norm_ptr = ai_meta.normalized_expr_.ptr();
@@ -1567,14 +1570,14 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTab
 
             ObSqlString select_sql;
             if (rw_pos > 0) {
-              OZ(select_sql.assign_fmt("SELECT `%.*s`, %.*s FROM `%.*s`.`%.*s` WHERE %.*s",
+              OZ(select_sql.assign_fmt("SELECT `%.*s`, %.*s AS req_arg FROM `%.*s`.`%.*s` WHERE %.*s",
                                        pk_col_name.length(), pk_col_name.ptr(),
                                        expr_arg.length(), expr_arg.ptr(),
                                        db_name.length(), db_name.ptr(),
                                        tbl_name.length(), tbl_name.ptr(),
                                        static_cast<int32_t>(rw_pos), rewritten_where));
             } else {
-              OZ(select_sql.assign_fmt("SELECT `%.*s`, %.*s FROM `%.*s`.`%.*s`",
+              OZ(select_sql.assign_fmt("SELECT `%.*s`, %.*s AS req_arg FROM `%.*s`.`%.*s`",
                                        pk_col_name.length(), pk_col_name.ptr(),
                                        expr_arg.length(), expr_arg.ptr(),
                                        db_name.length(), db_name.ptr(),
@@ -1599,7 +1602,9 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTab
 
             if (OB_SUCC(ret)) {
               struct TaskInfo {
-                int64_t pk_val_;
+                char rowkey_buf_[128];
+                char pred_buf_[256];
+                uint64_t rowkey_hash_;
                 ObString req_str_;
               };
               ObSEArray<TaskInfo, 16> tasks_to_create;
@@ -1611,12 +1616,25 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTab
                   ret = OB_ERR_UNEXPECTED;
                 } else {
                   while (OB_SUCC(ret) && OB_SUCC(q_res->next())) {
-                    int64_t pk_val = 0;
-                    ObString req_val;
-                    EXTRACT_INT_FIELD_MYSQL(*q_res, pk_col_name.ptr(), pk_val, int64_t);
-                    EXTRACT_VARCHAR_FIELD_MYSQL(*q_res, expr_arg.ptr(), req_val);
                     TaskInfo info;
-                    info.pk_val_ = pk_val;
+                    if (pk_is_str) {
+                      ObString pk_str;
+                      EXTRACT_VARCHAR_FIELD_MYSQL(*q_res, pk_col_name.ptr(), pk_str);
+                      info.rowkey_hash_ = pk_str.hash();
+                      snprintf(info.rowkey_buf_, sizeof(info.rowkey_buf_), "%.*s",
+                               pk_str.length(), pk_str.ptr());
+                      snprintf(info.pred_buf_, sizeof(info.pred_buf_), "`%.*s` = '%.*s'",
+                               pk_col_name.length(), pk_col_name.ptr(), pk_str.length(), pk_str.ptr());
+                    } else {
+                      int64_t pk_val = 0;
+                      EXTRACT_INT_FIELD_MYSQL(*q_res, pk_col_name.ptr(), pk_val, int64_t);
+                      info.rowkey_hash_ = static_cast<uint64_t>(pk_val);
+                      snprintf(info.rowkey_buf_, sizeof(info.rowkey_buf_), "%ld", pk_val);
+                      snprintf(info.pred_buf_, sizeof(info.pred_buf_), "`%.*s` = %ld",
+                               pk_col_name.length(), pk_col_name.ptr(), pk_val);
+                    }
+                    ObString req_val;
+                    EXTRACT_VARCHAR_FIELD_MYSQL(*q_res, "req_arg", req_val);
                     OZ(ob_write_string(alloc, req_val, info.req_str_));
                     OZ(tasks_to_create.push_back(info));
                   }
@@ -1637,10 +1655,7 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTab
                 uint64_t req_group_id = ObTimeUtility::current_time();
                 for (int64_t t = 0; OB_SUCC(ret) && t < tasks_to_create.count(); ++t) {
                   const TaskInfo &tinfo = tasks_to_create.at(t);
-                  uint64_t rowkey_hash = tinfo.pk_val_;
-                  char pred_buf[64];
-                  snprintf(pred_buf, sizeof(pred_buf), "`%.*s` = %ld",
-                           pk_col_name.length(), pk_col_name.ptr(), tinfo.pk_val_);
+                  uint64_t rowkey_hash = tinfo.rowkey_hash_;
 
                   ObSqlString del_task_sql;
                   OZ(del_task_sql.assign_fmt(
@@ -1664,8 +1679,8 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx, ObAlterTab
                   OZ(ins_task_sql.assign_fmt(
                       "REPLACE INTO oceanbase.__all_ai_column_task "
                       "(table_id, column_id, rowkey_hash, request_id, rowkey, rowkey_predicate, state, retry_count, eligible_ts, lease_ts, request, ret_code, trace_id) "
-                      "VALUES (%lu, %lu, %lu, %lu, '%ld', '%s', 0, 0, now(6), 0, '%.*s', 0, '')",
-                      table_id, column_id, rowkey_hash, req_group_id, tinfo.pk_val_, pred_buf,
+                      "VALUES (%lu, %lu, %lu, %lu, '%s', '%s', 0, 0, now(6), 0, '%.*s', 0, '')",
+                      table_id, column_id, rowkey_hash, req_group_id, tinfo.rowkey_buf_, tinfo.pred_buf_,
                       static_cast<int32_t>(escaped_req.length()), escaped_req.ptr()));
                   int64_t ins_rows = 0;
                   OZ(sql_proxy->write(ins_task_sql.ptr(), ins_rows));

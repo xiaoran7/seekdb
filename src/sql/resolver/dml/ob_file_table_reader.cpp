@@ -1389,17 +1389,17 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
       break;
     }
     if (first_row && options_.header_) {
-      // The header row names the columns; the schema starts out as text and is
-      // widened by the data rows below.
+      // The header row names the columns; the schema starts out with null type and is
+      // inferred from the data rows below.
       for (int64_t i = 0; OB_SUCC(ret) && i < fields.count(); ++i) {
         ObFileTableColumn column;
         if (OB_FAIL(dedup_column_name(schema_.columns(), allocator_,
                                       fields.at(i).ptr_, fields.at(i).len_,
                                       column.name_))) {
         } else {
-          column.type_.set_type(ObVarcharType);
+          column.type_.set_type(ObNullType);
           column.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-          column.nullable_ = true;
+          column.nullable_ = false;
           if (OB_FAIL(schema_.columns().push_back(column))) {
           }
         }
@@ -1418,15 +1418,16 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
           } else {
             column.type_.set_type(ObNullType);
             column.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-            column.nullable_ = true;
+            column.nullable_ = false;
             if (OB_FAIL(schema_.columns().push_back(column))) {
             }
           }
         }
         first_row = false;
       }
-      for (int64_t i = 0; OB_SUCC(ret) && i < fields.count() && i < schema_.columns().count(); ++i) {
-        if (fields.at(i).is_null_) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < schema_.columns().count(); ++i) {
+        if (i >= fields.count() || fields.at(i).is_null_) {
+          schema_.columns().at(i).nullable_ = true;
           continue;
         }
         ObFileTableColumn &column = schema_.columns().at(i);
@@ -1440,6 +1441,13 @@ int ObFileTableReader::infer_schema_from_csv(const char *data, const int64_t len
     }
     if (end_of_file) {
       break;
+    }
+  }
+  for (int64_t i = 0; i < schema_.columns().count(); ++i) {
+    if (ObNullType == schema_.columns().at(i).type_.get_type()) {
+      schema_.columns().at(i).type_.set_type(ObVarcharType);
+      schema_.columns().at(i).type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+      schema_.columns().at(i).nullable_ = true;
     }
   }
   return ret;
@@ -1762,6 +1770,12 @@ int ObFileTableReader::infer_schema_from_json(const char *data, const int64_t le
       }
     }
     pos = obj_end;
+  }
+  for (int64_t i = 0; i < schema_.columns().count(); ++i) {
+    if (ObNullType == schema_.columns().at(i).type_.get_type()) {
+      schema_.columns().at(i).type_.set_type(ObVarcharType);
+      schema_.columns().at(i).type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+    }
   }
   return ret;
 }
