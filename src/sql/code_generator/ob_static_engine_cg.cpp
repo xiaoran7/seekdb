@@ -18,6 +18,8 @@
 
 #include "config_bridge.h"
 #include "ob_static_engine_cg.h"
+#include "common/ob_field.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/optimizer/ob_log_group_by.h"
 #include "sql/optimizer/ob_log_sort.h"
 #include "sql/optimizer/ob_log_limit.h"
@@ -5487,6 +5489,38 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       spec.parallel_ = op.get_parallel();
       spec.is_overwrite_ = op.get_is_overwrite();
       spec.plan_->need_drive_dml_query_ = true;
+      if (phy_plan_->get_field_columns().empty() && op.get_select_exprs().count() > 0) {
+        common::ColumnsFieldArray fields(&alloc);
+        const int64_t expr_cnt = op.get_select_exprs().count();
+        if (OB_FAIL(fields.init(expr_cnt))) {
+        } else {
+          const ObSelectStmt *select_stmt = (op.get_stmt() && op.get_stmt()->is_select_stmt())
+                                            ? static_cast<const ObSelectStmt *>(op.get_stmt()) : nullptr;
+          for (int64_t i = 0; OB_SUCC(ret) && i < expr_cnt; ++i) {
+            const ObRawExpr *select_expr = op.get_select_exprs().at(i);
+            common::ObField f;
+            common::ObString cname;
+            if (nullptr != select_stmt && select_stmt->get_select_item_size() == expr_cnt) {
+              cname = select_stmt->get_select_item(i).alias_name_;
+            }
+            if (cname.empty() && nullptr != select_expr) {
+              cname = select_expr->get_alias_column_name();
+            }
+            if (cname.empty() && nullptr != select_expr) {
+              cname = select_expr->get_expr_name();
+            }
+            if (cname.empty() && nullptr != select_expr && select_expr->is_column_ref_expr()) {
+              cname = static_cast<const ObColumnRefRawExpr *>(select_expr)->get_column_name();
+            }
+            f.cname_ = cname;
+            f.org_cname_ = cname;
+            OZ(fields.push_back(f));
+          }
+          if (OB_SUCC(ret)) {
+            OZ(phy_plan_->set_field_columns(fields));
+          }
+        }
+      }
     }
   }
   return ret;

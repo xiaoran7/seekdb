@@ -64,7 +64,10 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
       } else if (OB_ISNULL(child_stmt)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("failed to generate stmt for child stmt");
-      } else if (1 == parse_tree.value_ && child_stmt->is_select_stmt() &&
+      } else if (NULL != parse_tree.children_[EXPLAIN_STMT_ID] &&
+                 T_INT == parse_tree.children_[EXPLAIN_STMT_ID]->type_ &&
+                 1 == parse_tree.children_[EXPLAIN_STMT_ID]->value_ &&
+                 child_stmt->is_select_stmt() &&
                  OB_NOT_NULL(allocator_) && OB_NOT_NULL(session_info_)) {
         // DuckDB DESCRIBE query: DESCRIBE SELECT ...
         // Produces: column_name | column_type | null | key | default | extra
@@ -201,7 +204,7 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
       explain_stmt->set_into_table(into_table);
     }
     ParseNode *statement_id_node = parse_tree.children_[EXPLAIN_STMT_ID];
-    if (OB_SUCC(ret) && NULL != statement_id_node) {
+    if (OB_SUCC(ret) && NULL != statement_id_node && T_INT != statement_id_node->type_) {
       ObString statement_id(statement_id_node->str_len_, statement_id_node->str_value_);
       explain_stmt->set_statement_id(statement_id);
     }

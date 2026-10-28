@@ -50,10 +50,9 @@
     malloc_terminal_node(display_node, result->malloc_pool_, display_type); \
   } \
   malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
-                           type_node, display_node, into_table, set_statement_id, stmt); \
-  if (NULL != (explain_stmt) && NULL != (is_desc)) { \
-    (explain_stmt)->value_ = 1; \
-  }
+                           type_node, display_node, into_table, \
+                           (NULL != (set_statement_id) ? (set_statement_id) : (is_desc)), \
+                           stmt);
 %}
 
 %destructor {destroy_tree($$);}<node>
@@ -4402,19 +4401,12 @@ COPY '(' select_stmt ')' TO STRING_VALUE opt_copy_format
   // statement shape as `SELECT ... INTO OUTFILE ... FORMAT (...)`, so the
   // existing outfile writer handles the file.
   ParseNode *into_node = NULL;
-  ParseNode *format_node = NULL;
   if (OB_ISNULL($3)) {
     yyerror(&@1, result, "invalid COPY source\n");
     YYABORT_NO_MEMORY;
   } else if (NULL != $7) {
-    malloc_non_terminal_node(format_node, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT, 1, $7);
-    if (OB_ISNULL(format_node)) {
-      yyerror(&@7, result, "No more space for malloc\n");
-      YYABORT_NO_MEMORY;
-    } else {
-      malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
-                               $6, format_node, NULL);
-    }
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
+                             $6, $7, NULL);
   } else {
     malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
                              $6, NULL, NULL);
@@ -4438,16 +4430,9 @@ COPY '(' select_stmt ')' TO STRING_VALUE opt_copy_format
 | COPY relation_factor TO STRING_VALUE opt_copy_format
 {
   ParseNode *into_node = NULL;
-  ParseNode *format_node = NULL;
   if (NULL != $5) {
-    malloc_non_terminal_node(format_node, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT, 1, $5);
-    if (OB_ISNULL(format_node)) {
-      yyerror(&@5, result, "No more space for malloc\n");
-      YYABORT_NO_MEMORY;
-    } else {
-      malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
-                               $4, format_node, NULL);
-    }
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
+                             $4, $5, NULL);
   } else {
     malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
                              $4, NULL, NULL);
@@ -11149,6 +11134,36 @@ simple_expr
 | NAME_OB COMP_EQ simple_expr
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $3);
+}
+| FORMAT COMP_EQ simple_expr
+{
+  ParseNode *name_node = NULL;
+  malloc_terminal_node(name_node, result->malloc_pool_, T_IDENT);
+  if (name_node) {
+    name_node->str_value_ = "format";
+    name_node->str_len_ = 6;
+  }
+  malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, name_node, $3);
+}
+| DELIMITER COMP_EQ simple_expr
+{
+  ParseNode *name_node = NULL;
+  malloc_terminal_node(name_node, result->malloc_pool_, T_IDENT);
+  if (name_node) {
+    name_node->str_value_ = "delimiter";
+    name_node->str_len_ = 9;
+  }
+  malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, name_node, $3);
+}
+| ESCAPE COMP_EQ simple_expr
+{
+  ParseNode *name_node = NULL;
+  malloc_terminal_node(name_node, result->malloc_pool_, T_IDENT);
+  if (name_node) {
+    name_node->str_value_ = "escape";
+    name_node->str_len_ = 6;
+  }
+  malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, name_node, $3);
 }
 ;
 

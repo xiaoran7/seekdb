@@ -380,7 +380,7 @@ int ObOllamaUtils::ObOllamaComplete::get_body(common::ObIAllocator &allocator,
       } else if (OB_FAIL(body_obj->add("prompt", content_str))) {
       } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_boolean(allocator, false, stream_bool))) {
       } else if (OB_FAIL(body_obj->add("stream", stream_bool))) {
-      } else if (OB_FAIL(ObAIFuncJsonUtils::compact_json_object(allocator, config, body_obj))) {
+      } else if (OB_NOT_NULL(config) && OB_FAIL(ObAIFuncJsonUtils::compact_json_object(allocator, config, body_obj))) {
       } else {
         body = body_obj;
       }
@@ -478,7 +478,7 @@ int ObOllamaUtils::ObOllamaEmbed::get_body(common::ObIAllocator &allocator,
       }
     }
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(ObAIFuncJsonUtils::compact_json_object(allocator, config, body))) {
+      if (OB_NOT_NULL(config) && OB_FAIL(ObAIFuncJsonUtils::compact_json_object(allocator, config, body))) {
       }
     }
   }

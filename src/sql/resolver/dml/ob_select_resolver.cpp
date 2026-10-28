@@ -2999,6 +2999,10 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
   } else if (OB_FAIL(resolve_into_const_node(node->children_[0], into_item.outfile_name_))) {
   }
   if (OB_SUCC(ret) && NULL != (format_node = node->children_[1])) { // format
+    if (1 == format_node->num_child_ && NULL != format_node->children_[0] &&
+        T_EXTERNAL_FILE_FORMAT == format_node->children_[0]->type_) {
+      format_node = format_node->children_[0];
+    }
     for (int i = 0; OB_SUCC(ret) && i < format_node->num_child_; ++i) {
       if (OB_ISNULL(option_node = format_node->children_[i])) {
         ret = OB_ERR_UNEXPECTED;
@@ -3021,7 +3025,11 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
       ObCollationType file_cs_type = has_cs_type
                                      ? ObCharset::get_default_collation(external_format.csv_format_.cs_type_)
                                      : ObCharset::get_system_collation();
-      if (OB_FAIL(external_format.csv_format_.init_format(ObDataInFileStruct(), 0, file_cs_type))) {
+      ObDataInFileStruct default_struct;
+      if (ObExternalFileFormat::CSV_FORMAT == external_format.format_type_) {
+        default_struct.field_term_str_ = ",";
+      }
+      if (OB_FAIL(external_format.csv_format_.init_format(default_struct, 0, file_cs_type))) {
       }
     }
     for (int i = 0; OB_SUCC(ret) && i < format_node->num_child_; ++i) {
@@ -3030,6 +3038,12 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
       } else if (T_EXTERNAL_FILE_FORMAT_TYPE == option_node->type_
                  || T_CHARSET == option_node->type_) {
       } else if (OB_FAIL(ObResolverUtils::resolve_file_format(option_node, external_format, params_))) {
+      }
+    }
+    if (OB_SUCC(ret) && ObExternalFileFormat::CSV_FORMAT == external_format.format_type_) {
+      if (external_format.csv_format_.field_term_str_.empty() ||
+          external_format.csv_format_.field_term_str_ == "\t") {
+        external_format.csv_format_.field_term_str_ = ",";
       }
     }
     if (OB_SUCC(ret)
