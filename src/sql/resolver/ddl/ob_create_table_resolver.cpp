@@ -633,6 +633,13 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
     // Store the column schema after resolve_column_definition in resolved_cols
     // To support generating columns in any order, all column_schema are generated first and then uniformly stored in table_schema
     ObSEArray<ObColumnSchemaV2, SEARRAY_INIT_NUM> resolved_cols;
+    // Hidden __ai_* columns get column ids after the whole first traversal has already
+    // assigned ids to every user column, so their ids are always larger than the user
+    // columns that follow them in the statement.  Adding them to table_schema on the
+    // spot would break the column array's column-id ordering and tablet creation later
+    // rejects the schema with OB_ERR_UNEXPECTED, so they are held here and appended
+    // after all user columns (see the hidden column loop below).
+    ObSEArray<ObColumnSchemaV2, SEARRAY_INIT_NUM> ai_hidden_cols;
     // Resolve column names with the runtime name-case mode.
     //RESOLVE_NON_COL needs to add the columns in the query to stats in order to resolve PK constraint information etc.
     if (OB_FAIL(ret)) {
@@ -769,10 +776,7 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
               state_col.set_cur_default_value(state_default, false);
               state_col.set_orig_default_value(state_default);
               if (OB_FAIL(state_col.set_column_name(state_col_name))) {
-              } else if (OB_FAIL(table_schema.add_column(state_col))) {
-              } else {
-                ObColumnNameHashWrapper name_key(state_col.get_column_name_str());
-                column_name_set_.set_refactored(name_key);
+              } else if (OB_FAIL(ai_hidden_cols.push_back(state_col))) {
               }
 
               // Hidden request column: __ai_request_<col>
@@ -791,16 +795,10 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
               req_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
               req_col.set_prev_column_id(UINT64_MAX);
               req_col.set_next_column_id(UINT64_MAX);
-              ObObj req_default;
-              req_default.set_varchar(stat.ai_normalized_expr_);
-              req_col.set_cur_default_value(req_default, false);
-              req_col.set_orig_default_value(req_default);
               if (OB_FAIL(ret)) {
+              } else if (OB_FAIL(req_col.set_comment(stat.ai_normalized_expr_))) {
               } else if (OB_FAIL(req_col.set_column_name(req_col_name))) {
-              } else if (OB_FAIL(table_schema.add_column(req_col))) {
-              } else {
-                ObColumnNameHashWrapper name_key(req_col.get_column_name_str());
-                column_name_set_.set_refactored(name_key);
+              } else if (OB_FAIL(ai_hidden_cols.push_back(req_col))) {
               }
 
               // Hidden result spec column: __ai_result_spec_<col>
@@ -821,10 +819,7 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
               spec_col.set_next_column_id(UINT64_MAX);
               if (OB_FAIL(ret)) {
               } else if (OB_FAIL(spec_col.set_column_name(spec_col_name))) {
-              } else if (OB_FAIL(table_schema.add_column(spec_col))) {
-              } else {
-                ObColumnNameHashWrapper name_key(spec_col.get_column_name_str());
-                column_name_set_.set_refactored(name_key);
+              } else if (OB_FAIL(ai_hidden_cols.push_back(spec_col))) {
               }
 
               if (OB_FAIL(ret)) {
@@ -983,6 +978,20 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         if (OB_FAIL(table_schema.add_column(hidden_col))) {
         } else {
           ObColumnNameHashWrapper name_key(hidden_col.get_column_name_str());
+          if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
+          }
+        }
+      }
+    }
+    // The __ai_* hidden columns are appended here, after every user column, because
+    // add_column() appends to the column array and the array must stay sorted by
+    // column id.
+    if (OB_SUCC(ret)) {
+      for (int64_t i = 0; i < ai_hidden_cols.count() && OB_SUCC(ret); i++) {
+        ObColumnSchemaV2 &ai_hidden_col = ai_hidden_cols.at(i);
+        if (OB_FAIL(table_schema.add_column(ai_hidden_col))) {
+        } else {
+          ObColumnNameHashWrapper name_key(ai_hidden_col.get_column_name_str());
           if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
           }
         }

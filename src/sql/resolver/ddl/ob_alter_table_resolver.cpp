@@ -3471,6 +3471,10 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         } else if (OB_FAIL(fill_column_schema_according_stat(stat, alter_column_schema))) {
         } else if (OB_FAIL(set_column_collation(alter_column_schema))) {
         }
+        SQL_RESV_LOG(WARN, "[AIADD] after resolve def", KR(ret), "is_ai", stat.is_ai_column_,
+                     "col", alter_column_schema.get_column_name_str(),
+                     "type", alter_column_schema.get_data_type(),
+                     "cur_def", alter_column_schema.get_cur_default_value());
 
         //do some check
         if (OB_SUCC(ret)) {
@@ -3547,13 +3551,11 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
             req_col.set_nullable(true);
             req_col.set_charset_type(CHARSET_UTF8MB4);
             req_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+            req_col.set_data_length(OB_MAX_LONGTEXT_LENGTH);
             req_col.set_prev_column_id(UINT64_MAX);
             req_col.set_next_column_id(UINT64_MAX);
-            ObObj req_default;
-            req_default.set_varchar(stat.ai_normalized_expr_);
-            req_col.set_cur_default_value(req_default, false);
-            req_col.set_orig_default_value(req_default);
             if (OB_FAIL(ret)) {
+            } else if (OB_FAIL(req_col.set_comment(stat.ai_normalized_expr_))) {
             } else if (OB_FAIL(req_col.set_column_name(req_col_name))) {
             } else if (OB_FAIL(alter_table_stmt->add_column(req_col))) {
             } else {
@@ -3573,6 +3575,7 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
             spec_col.set_nullable(true);
             spec_col.set_charset_type(CHARSET_UTF8MB4);
             spec_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+            spec_col.set_data_length(OB_MAX_LONGTEXT_LENGTH);
             spec_col.set_prev_column_id(UINT64_MAX);
             spec_col.set_next_column_id(UINT64_MAX);
             if (OB_FAIL(ret)) {

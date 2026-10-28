@@ -73,7 +73,7 @@ int ObAiColumnProxy::delete_ai_column(ObMySQLTransaction &trans,
   int ret = OB_SUCCESS;
   ObSqlString sql;
   int64_t affected_rows = 0;
-  if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id = %lu AND column_id = %lu",
+  if (OB_FAIL(sql.assign_fmt("DELETE FROM oceanbase.%s WHERE table_id = %lu AND column_id = %lu",
                              OB_ALL_AI_COLUMN_TNAME, table_id, column_id))) {
   } else if (OB_FAIL(trans.write(sql.ptr(), affected_rows))) {
   }
@@ -86,7 +86,7 @@ int ObAiColumnProxy::delete_all_ai_columns(ObMySQLTransaction &trans,
   int ret = OB_SUCCESS;
   ObSqlString sql;
   int64_t affected_rows = 0;
-  if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id = %lu",
+  if (OB_FAIL(sql.assign_fmt("DELETE FROM oceanbase.%s WHERE table_id = %lu",
                              OB_ALL_AI_COLUMN_TNAME, table_id))) {
   } else if (OB_FAIL(trans.write(sql.ptr(), affected_rows))) {
   }
@@ -142,7 +142,7 @@ int ObAiColumnProxy::load_ai_columns(ObISQLClient &sql_client,
 {
   int ret = OB_SUCCESS;
   ObSqlString sql;
-  if (OB_FAIL(sql.assign_fmt("SELECT %s FROM %s WHERE table_id = %lu ORDER BY column_id",
+  if (OB_FAIL(sql.assign_fmt("SELECT %s FROM oceanbase.%s WHERE table_id = %lu ORDER BY column_id",
                              AI_COLUMN_SELECT_LIST, OB_ALL_AI_COLUMN_TNAME, table_id))) {
   } else {
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {
@@ -180,7 +180,7 @@ int ObAiColumnProxy::load_ai_column(ObISQLClient &sql_client,
   int ret = OB_SUCCESS;
   ObSqlString sql;
   if (OB_FAIL(sql.assign_fmt(
-      "SELECT %s FROM %s WHERE table_id = %lu AND column_id = %lu",
+      "SELECT %s FROM oceanbase.%s WHERE table_id = %lu AND column_id = %lu",
       AI_COLUMN_SELECT_LIST, OB_ALL_AI_COLUMN_TNAME, table_id, column_id))) {
   } else {
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {
@@ -215,7 +215,7 @@ int ObAiColumnProxy::has_ai_column(ObISQLClient &sql_client,
   int ret = OB_SUCCESS;
   ObSqlString sql;
   has_ai_column = false;
-  if (OB_FAIL(sql.assign_fmt("SELECT COUNT(*) AS cnt FROM %s WHERE table_id = %lu",
+  if (OB_FAIL(sql.assign_fmt("SELECT COUNT(*) AS cnt FROM oceanbase.%s WHERE table_id = %lu",
                              OB_ALL_AI_COLUMN_TNAME, table_id))) {
   } else {
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {

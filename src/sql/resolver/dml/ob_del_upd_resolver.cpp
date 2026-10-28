@@ -441,8 +441,8 @@ static bool check_column_in_ai_expr(const ObString &col_name, const ObString &ex
     int32_t c_len = col_name.length();
     for (int32_t i = 0; !found && i + c_len <= len; ++i) {
       if (0 == strncasecmp(p + i, col_name.ptr(), c_len)) {
-        bool left_ok = (i == 0 || (!isalnum(p[i - 1]) && p[i - 1] != '_' && p[i - 1] != '`'));
-        bool right_ok = (i + c_len == len || (!isalnum(p[i + c_len]) && p[i + c_len] != '_' && p[i + c_len] != '`'));
+        bool left_ok = (i == 0 || (!isalnum(p[i - 1]) && p[i - 1] != '_'));
+        bool right_ok = (i + c_len == len || (!isalnum(p[i + c_len]) && p[i + c_len] != '_'));
         if (left_ok && right_ok) {
           found = true;
         }
@@ -510,8 +510,11 @@ int ObDelUpdResolver::check_update_vector_col_with_vector_index(const ObTableSch
                      c->get_column_name_str().length(), c->get_column_name_str().ptr());
             const ObColumnSchemaV2 *req_col = table_schema->get_column_schema(req_name);
             if (OB_NOT_NULL(req_col)) {
-              ObString norm_expr = req_col->get_cur_default_value().get_string();
-              if (norm_expr.empty() || check_column_in_ai_expr(as_cname, norm_expr)) {
+              ObString norm_expr = req_col->get_comment_str();
+              if (norm_expr.empty()) {
+                norm_expr = req_col->get_cur_default_value().get_string();
+              }
+              if (!norm_expr.empty() && check_column_in_ai_expr(as_cname, norm_expr)) {
                 bool has_vidx = false;
                 ObIndexType v_idx_type = INDEX_TYPE_MAX;
                 if (OB_FAIL(ObVectorIndexUtil::check_column_has_vector_index(*table_schema,
@@ -623,7 +626,10 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
               const ObColumnSchemaV2 *req_col = table_schema->get_column_schema(req_name);
               ObString norm_expr;
               if (OB_NOT_NULL(req_col)) {
-                norm_expr = req_col->get_cur_default_value().get_string();
+                norm_expr = req_col->get_comment_str();
+                if (norm_expr.empty()) {
+                  norm_expr = req_col->get_cur_default_value().get_string();
+                }
               }
               bool dep_changed = false;
               for (int64_t a = 0; !dep_changed && a < assigns.at(i).assignments_.count(); ++a) {
@@ -634,7 +640,12 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                     if (assigned_col->is_rowkey_column()) {
                       dep_changed = true;
                     } else if (!assigned_col->is_hidden()) {
-                      if (norm_expr.empty() || check_column_in_ai_expr(assigned_col->get_column_name_str(), norm_expr)) {
+                      char as_sname[OB_MAX_COLUMN_NAME_LENGTH];
+                      snprintf(as_sname, sizeof(as_sname), "__ai_state_%.*s",
+                               assigned_col->get_column_name_str().length(), assigned_col->get_column_name_str().ptr());
+                      bool is_assigned_ai = (nullptr != table_schema->get_column_schema(as_sname));
+                      if (!is_assigned_ai && !norm_expr.empty() &&
+                          check_column_in_ai_expr(assigned_col->get_column_name_str(), norm_expr)) {
                         dep_changed = true;
                       }
                     }

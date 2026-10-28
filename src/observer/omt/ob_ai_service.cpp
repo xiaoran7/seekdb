@@ -146,6 +146,7 @@ int ObAiColumnWorkerTask::do_work()
   }
 
   for (int64_t i = 0; i < tasks.count(); ++i) {
+    ret = OB_SUCCESS;
     const TaskItem &item = tasks.at(i);
     ObArenaAllocator alloc;
     share::ObAiColumnSchema ai_schema;
@@ -166,8 +167,8 @@ int ObAiColumnWorkerTask::do_work()
       if (OB_SUCC(sql_proxy->read(t_res, table_info_sql.ptr())) && OB_NOT_NULL(res_ptr = t_res.get_result())) {
         if (OB_SUCC(res_ptr->next())) {
           ObString d_str, t_str;
-          EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "database_name", d_str);
-          EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "table_name", t_str);
+          (void) res_ptr->get_varchar("database_name", d_str);
+          (void) res_ptr->get_varchar("table_name", t_str);
           snprintf(db_name, sizeof(db_name), "%.*s", d_str.length(), d_str.ptr());
           snprintf(table_name, sizeof(table_name), "%.*s", t_str.length(), t_str.ptr());
         }
@@ -215,8 +216,8 @@ int ObAiColumnWorkerTask::do_work()
       if (OB_SUCC(sql_proxy->read(eval_res, eval_sql.ptr())) && OB_NOT_NULL(res_ptr = eval_res.get_result())) {
         if (OB_SUCC(res_ptr->next())) {
           ObString s;
-          EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "ai_res", s);
-          if (OB_SUCC(ret)) {
+          int get_ret = res_ptr->get_varchar("ai_res", s);
+          if (OB_SUCCESS == get_ret && !s.empty()) {
             eval_succ = true;
             int64_t copy_len = std::min(static_cast<int64_t>(sizeof(res_buf) - 1), static_cast<int64_t>(s.length()));
             MEMCPY(res_buf, s.ptr(), copy_len);
@@ -225,6 +226,7 @@ int ObAiColumnWorkerTask::do_work()
         }
       }
     }
+    ret = OB_SUCCESS;
 
     bool is_stale = false;
     ObSqlString check_stale_sql;
@@ -237,13 +239,14 @@ int ObAiColumnWorkerTask::do_work()
       int64_t cnt = 0;
       if (OB_SUCC(sql_proxy->read(c_res, check_stale_sql.ptr())) && OB_NOT_NULL(res_ptr = c_res.get_result())) {
         if (OB_SUCC(res_ptr->next())) {
-          EXTRACT_INT_FIELD_MYSQL(*res_ptr, "cnt", cnt, int64_t);
+          (void) res_ptr->get_int("cnt", cnt);
           if (cnt == 0) {
             is_stale = true;
           }
         }
       }
     }
+    ret = OB_SUCCESS;
 
     if (is_stale) {
       LOG_INFO("late old ai task dropped", K(item.table_id_), K(item.column_id_), K(item.request_id_));
@@ -295,10 +298,11 @@ int ObAiColumnWorkerTask::do_work()
       ObMySQLResult *res_ptr = nullptr;
       if (OB_SUCC(sql_proxy->read(u_res, unready_sql.ptr())) && OB_NOT_NULL(res_ptr = u_res.get_result())) {
         if (OB_SUCC(res_ptr->next())) {
-          EXTRACT_INT_FIELD_MYSQL(*res_ptr, "cnt", unready_count, int64_t);
+          (void) res_ptr->get_int("cnt", unready_count);
         }
       }
     }
+    ret = OB_SUCCESS;
 
     if (unready_count == 0) {
       ObSqlString group_tasks_sql;
@@ -321,11 +325,11 @@ int ObAiColumnWorkerTask::do_work()
             int64_t t_state = 0;
             ObString col_n;
             ObString result_val;
-            EXTRACT_INT_FIELD_MYSQL(*res_ptr, "column_id", cid, uint64_t);
-            EXTRACT_INT_FIELD_MYSQL(*res_ptr, "state", t_state, int64_t);
-            EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "column_name", col_n);
-            EXTRACT_VARCHAR_FIELD_MYSQL(*res_ptr, "request", result_val);
-            if (OB_SUCC(ret)) {
+            (void) res_ptr->get_uint("column_id", cid);
+            (void) res_ptr->get_int("state", t_state);
+            (void) res_ptr->get_varchar("column_name", col_n);
+            (void) res_ptr->get_varchar("request", result_val);
+            if (!col_n.empty()) {
               if (!first_set) {
                 update_row_sql.append_fmt(", ");
               }
@@ -349,18 +353,19 @@ int ObAiColumnWorkerTask::do_work()
         }
       }
 
+      int64_t aff_rows = 0;
       if (!first_set) {
         update_row_sql.append_fmt(" WHERE %s", item.rowkey_pred_);
-        int64_t aff_rows = 0;
         sql_proxy->write(update_row_sql.ptr(), aff_rows);
-
-        ObSqlString del_done_sql;
-        del_done_sql.assign_fmt(
-            "DELETE FROM oceanbase.__all_ai_column_task "
-            "WHERE table_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
-            item.table_id_, item.rowkey_hash_, item.request_id_);
-        sql_proxy->write(del_done_sql.ptr(), aff_rows);
       }
+
+      ObSqlString del_done_sql;
+      del_done_sql.assign_fmt(
+          "DELETE FROM oceanbase.__all_ai_column_task "
+          "WHERE table_id = %lu AND rowkey_hash = %lu AND request_id = %lu",
+          item.table_id_, item.rowkey_hash_, item.request_id_);
+      sql_proxy->write(del_done_sql.ptr(), aff_rows);
+      ret = OB_SUCCESS;
     }
   }
   return ret;

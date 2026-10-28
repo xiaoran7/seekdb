@@ -2578,7 +2578,14 @@ int ObDDLResolver::normalize_ai_column_expr(const share::schema::ObColumnSchemaV
   } else if (stmt::T_CREATE_TABLE == stmt_->get_stmt_type()) {
     table_schema = &static_cast<ObCreateTableStmt *>(stmt_)->get_create_table_arg().schema_;
   } else if (stmt::T_ALTER_TABLE == stmt_->get_stmt_type()) {
-    table_schema = &static_cast<ObAlterTableStmt *>(stmt_)->get_alter_table_arg().alter_table_schema_;
+    // alter_table_schema_ only holds the columns being added or changed, so a
+    // reference to an existing column of the table cannot be resolved against it.
+    // Resolve the AI expression against the original table schema instead.
+    const share::schema::ObTableSchema *orig_table_schema = NULL;
+    if (OB_FAIL(get_table_schema_for_check(orig_table_schema))) {
+    } else {
+      table_schema = const_cast<share::schema::ObTableSchema *>(orig_table_schema);
+    }
   }
   if (OB_FAIL(ret)) {
   } else if (OB_ISNULL(table_schema)) {
@@ -2724,9 +2731,24 @@ int ObDDLResolver::resolve_ai_column_attribute(share::schema::ObColumnSchemaV2 &
                                               resolve_stat.ai_normalized_expr_))) {
   } else {
     resolve_stat.is_ai_column_ = true;
-    // An AI column is produced asynchronously, so it starts out NULL and must
-    // accept that value while the worker has not answered yet.
-    column.set_nullable(true);
+    // normalize_ai_column_expr() goes through
+    // ObResolverUtils::resolve_generated_column_expr(), which ends by printing
+    // the resolved expression into column.cur_default_value via
+    // print_expr_to_default_value(). For a real generated column that is the
+    // stored expression, but an AI column carries its expression in
+    // resolve_stat.ai_normalized_expr_, and the leftover default value is then
+    // cast against the column type by ObCreateTableResolver::check_default_value:
+    // json/vector columns fail the cast (1067 Invalid default value), varchar
+    // columns trip over an unset collation (4016). Clear it so the column keeps
+    // the ordinary "no default" state.
+    ObObj null_default;
+    null_default.set_null();
+    if (OB_FAIL(column.set_cur_default_value(null_default, false))) {
+    } else {
+      // An AI column is produced asynchronously, so it starts out NULL and must
+      // accept that value while the worker has not answered yet.
+      column.set_nullable(true);
+    }
   }
   return ret;
 }
